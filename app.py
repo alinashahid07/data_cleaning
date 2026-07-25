@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 from typing import Optional
 import io
 
@@ -60,6 +61,168 @@ def remove_character(df: pd.DataFrame, colname: str, ch_to_remove: str):
         df[colname] = df[colname].astype(str).str.replace(ch_to_remove, "", regex=False)
     return df
 
+# trim edge characters
+def clean_string_edges(
+    df: pd.DataFrame,
+    threshold: float = 0.7,
+    inplace: bool = False,
+    verbose: bool = False
+) -> Optional[pd.DataFrame]:
+    """Intelligently trims edge characters when conditions are met."""
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+    if df.empty:
+        if verbose:
+            st.warning("Warning: Empty DataFrame received")
+        return None if inplace else df.copy()
+
+    try:
+        df_clean = df if inplace else df.copy()
+        cleaned_cols = []
+
+        for col in df_clean.select_dtypes(include=['object']).columns:
+            col_series = df_clean[col].astype(str)
+
+            leading_chars = col_series.str.extract(r'^([^\w\s])')[0].dropna()
+            trailing_chars = col_series.str.extract(r'([^\w\s])$')[0].dropna()
+
+            keep_leading = (leading_chars.value_counts(normalize=True).iloc[0] > threshold
+                           if len(leading_chars) > 0 else False)
+            keep_trailing = (trailing_chars.value_counts(normalize=True).iloc[0] > threshold
+                             if len(trailing_chars) > 0 else False)
+
+            if not keep_leading:
+                if keep_leading is False:
+                    df_clean[col] = col_series.str.replace(r'^\W+', '', regex=True)
+                    cleaned_cols.append(col)
+
+            if not keep_trailing:
+                if keep_trailing is False:
+                    df_clean[col] = col_series.str.replace(r'\W+$', '', regex=True)
+                    if col not in cleaned_cols:
+                        cleaned_cols.append(col)
+
+        if verbose and cleaned_cols:
+            st.success(f"Cleaned string edges in {len(cleaned_cols)} columns: {', '.join(cleaned_cols[:5])}")
+
+        return None if inplace else df_clean
+    except Exception as e:
+        if verbose:
+            st.error(f"Error during string cleaning: {str(e)}")
+        raise
+
+# convert messy numeric columns
+def smart_column_cleaner(
+    df: pd.DataFrame,
+    conversion_threshold: float = 0.6,
+    inplace: bool = False,
+    verbose: bool = False
+) -> Optional[pd.DataFrame]:
+    """Ultimate smart column cleaner for numeric formats."""
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+    if df.empty:
+        if verbose:
+            st.warning("Empty DataFrame received")
+        return None if inplace else df.copy()
+
+    try:
+        df_clean = df if inplace else df.copy()
+
+        # currency patterns
+        currency_symbols = r'[$€£¥₹₽₺₩฿₡₦₲₴₵₸₳₻₼₽₾₿]'
+        currency_codes = r'(USD|EUR|GBP|JPY|CNY|INR|RUB|AUD|CAD|PKR|BDT|LKR|NPR|SGD|HKD|AED|CHF)'
+        currency_text = r'(dollars?|euros?|pounds?|rupees?|yuan|yen|rubles?|pesos?|riyal|ringgit|baht|dinar|lei|krona|forint|złoty)'
+        currency_pattern = f'{currency_symbols}|{currency_codes}|{currency_text}'
+
+        conversions = []
+
+        for col in df_clean.select_dtypes(include='object').columns:
+            series = df_clean[col].astype(str).str.strip()
+            non_empty = series.replace('', np.nan).dropna()
+
+            if non_empty.empty:
+                continue
+
+            # currency detection
+            currency_like = non_empty.str.contains(r'\d', regex=True) & non_empty.str.contains(currency_pattern, case=False, regex=True)
+            if currency_like.mean() > conversion_threshold:
+                cleaned = (
+                    non_empty.str.replace(r'[^\d.,\-()]', ' ', regex=True)
+                    .str.replace(r'\s+', ' ', regex=True)
+                    .str.replace(r'\((.+?)\)', r'-\1', regex=True)
+                    .str.extract(r'([-]?\d[\d\.,]*)', expand=False)
+                    .str.replace(',', '', regex=False)
+                )
+
+                converted = pd.to_numeric(cleaned, errors='coerce')
+                if converted.notna().mean() > conversion_threshold:
+                    df_clean[col] = converted
+                    conversions.append(f"{col} (currency)")
+                    continue
+
+            # percentage detection
+            if non_empty.str.contains('%').mean() > conversion_threshold:
+                cleaned = non_empty.str.replace('%', '', regex=False)
+                cleaned = cleaned.str.replace(r'[^\d.\-]', '', regex=True)
+                converted = pd.to_numeric(cleaned, errors='coerce') / 100
+                if converted.notna().mean() > conversion_threshold:
+                    df_clean[col] = converted
+                    conversions.append(f"{col} (percentage)")
+                    continue
+
+            # unit detection
+            unit_pattern = r'\d+\s?(kg|g|mg|cm|mm|m|km|ml|l|lb|oz|gal|pt|°C|°F|kWh|cal|ha|ac|sqft|m²|km²)'
+            if non_empty.str.contains(unit_pattern, case=False, regex=True).mean() > conversion_threshold:
+                cleaned = non_empty.str.extract(r'([-]?\d+\.?\d*)', expand=False)
+                converted = pd.to_numeric(cleaned, errors='coerce')
+                if converted.notna().mean() > conversion_threshold:
+                    df_clean[col] = converted
+                    conversions.append(f"{col} (unit)")
+                    continue
+
+            # duration detection
+            duration_pattern = r'(h|hr|hour|min|minute|sec|second|s|m)'
+            if non_empty.str.contains(duration_pattern, case=False, regex=True).mean() > conversion_threshold:
+                def convert_duration(val):
+                    val = str(val).lower()
+                    total_seconds = 0
+                    parts = re.findall(r'(\d+\.?\d*)\s*(h(?:ou?r)?|m(?:in)?|s(?:ec)?)', val)
+                    for num, unit in parts:
+                        num = float(num)
+                        if unit.startswith('h'):
+                            total_seconds += num * 3600
+                        elif unit.startswith('m'):
+                            total_seconds += num * 60
+                        elif unit.startswith('s'):
+                            total_seconds += num
+                    return total_seconds if total_seconds > 0 else np.nan
+
+                converted = non_empty.apply(convert_duration)
+                if converted.notna().mean() > conversion_threshold:
+                    df_clean[col] = converted
+                    conversions.append(f"{col} (duration to seconds)")
+                    continue
+
+            # generic numeric detection
+            cleaned = non_empty.str.replace(r'[^\d.\-]', '', regex=True)
+            converted = pd.to_numeric(cleaned, errors='coerce')
+            if converted.notna().mean() > conversion_threshold:
+                df_clean[col] = converted
+                conversions.append(f"{col} (numeric)")
+
+        if verbose and conversions:
+            st.success(f"Converted {len(conversions)} columns:")
+            for conv in conversions:
+                st.write(f"  - {conv}")
+
+        return None if inplace else df_clean
+
+    except Exception as e:
+        if verbose:
+            st.error(f"Error during smart cleaning: {str(e)}")
+        raise
+
 # get stats summary
 def get_dataframe_stats(df):
     """Returns key statistics about the DataFrame."""
@@ -76,6 +239,24 @@ def get_dataframe_stats(df):
 # page title
 st.markdown('<p class="main-header">Data Cleaning Pipeline</p>', unsafe_allow_html=True)
 st.markdown("Upload a csv file to clean it using the pipeline.")
+
+# sidebar settings
+with st.sidebar:
+    st.header("Settings")
+    st.subheader("Smart Cleaner")
+    conversion_threshold = st.slider(
+        "Conversion Threshold %",
+        0, 100, 60,
+        help="Minimum percentage of values that must be convertible"
+    ) / 100
+
+    st.divider()
+
+    if st.button("Reset All", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
 st.divider()
 
 # file upload
@@ -146,7 +327,9 @@ if uploaded_file is not None:
         # cleaning buttons
         st.subheader("Cleaning Operations")
         st.markdown("Choose the cleaning operations to perform on your data")
-        col1, col2, col3 = st.columns(3)
+
+        st.write("**Basic Cleaning**")
+        col1, col2, col3, col4 = st.columns(4)
 
         with col1:
             if st.button("Strip Whitespace", use_container_width=True):
@@ -175,6 +358,56 @@ if uploaded_file is not None:
                     st.session_state.current_df = remove_duplicate_columns(st.session_state.current_df)
                     after_cols = st.session_state.current_df.shape[1]
                     st.success(f"Dropped {before_cols-after_cols} duplicate columns!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+        with col4:
+            if st.button("Clean String Edges", use_container_width=True):
+                try:
+                    with st.spinner("Cleaning string edges..."):
+                        st.session_state.current_df = clean_string_edges(
+                            st.session_state.current_df,
+                            threshold=0.7,
+                            verbose=True
+                        )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+        st.write("")
+
+        # advanced cleaning
+        st.write("**Advanced Cleaning**")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("Smart Column Cleaner", use_container_width=True,
+                        help="Auto-detect and convert currency, percentages, units, durations"):
+                try:
+                    with st.spinner("Analyzing and converting columns..."):
+                        st.session_state.current_df = smart_column_cleaner(
+                            st.session_state.current_df,
+                            conversion_threshold=conversion_threshold,
+                            verbose=True
+                        )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+        with col2:
+            if st.button("Run Basic Pipeline", use_container_width=True,
+                        help="Strip whitespace, remove duplicates, clean strings, smart convert"):
+                try:
+                    with st.spinner("Running basic cleaning pipeline..."):
+                        df_temp = st.session_state.current_df.copy()
+                        df_temp = strip_whitespace(df_temp)
+                        df_temp = remove_duplicate_rows(df_temp)
+                        df_temp = remove_duplicate_columns(df_temp)
+                        df_temp = clean_string_edges(df_temp, threshold=0.7, verbose=False)
+                        df_temp = smart_column_cleaner(df_temp, conversion_threshold=conversion_threshold, verbose=False)
+                        st.session_state.current_df = df_temp
+                        st.success("Basic pipeline completed!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
@@ -239,9 +472,11 @@ else:
     # sample format
     with st.expander("Sample Data Format"):
         sample_df = pd.DataFrame({
-            'name': ['  Alice  ', 'Bob', 'Charlie', 'Alice'],
-            'price': ['$100', '$200.50', '€300', '$100'],
-            'status': ['active', 'active', 'inactive', 'active']
+            'name': ['  Alice  ', 'Bob', 'Charlie'],
+            'price': ['$100', '€200.50', '£300'],
+            'percentage': ['75%', '80.5%', '99%'],
+            'weight': ['100kg', '150.5 lbs', '200g'],
+            'duration': ['1h30m', '90min', '2 hours']
         })
         st.dataframe(sample_df, use_container_width=True)
-        st.caption("Upload a CSV file with similar structure to get started!")
+        st.caption("The pipeline can handle currency, percentages, units, and durations automatically!")
