@@ -3,8 +3,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import KNNImputer, IterativeImputer
 from typing import Optional
 import io
+import openpyxl
 
 # page setup
 st.set_page_config(
@@ -223,6 +226,85 @@ def smart_column_cleaner(
             st.error(f"Error during smart cleaning: {str(e)}")
         raise
 
+# fill missing values
+def missing_value_handler(
+    df: pd.DataFrame,
+    threshold: float = 0.3,
+    inplace: bool = False,
+    numeric_strategy: str = 'auto',
+    verbose: bool = False
+) -> Optional[pd.DataFrame]:
+    """Enhanced missing value handler with KNN/MICE imputation."""
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+    if not 0 <= threshold <= 1:
+        raise ValueError("Threshold must be between 0 and 1")
+
+    if df.empty:
+        if verbose:
+            st.warning("Warning: Empty DataFrame received")
+        return None if inplace else df.copy()
+
+    try:
+        if not inplace:
+            df_clean = df.copy()
+        else:
+            df_clean = df
+
+        # switch to mice for large data
+        if numeric_strategy == 'auto':
+            if df_clean.shape[1] > 50 or len(df_clean) > 5000:
+                numeric_strategy = 'mice'
+                if verbose:
+                    st.info("Auto-switched to MICE (dataset exceeds 50 columns or 5,000 rows)")
+
+        # convert missing indicators
+        missing_indicators = ['?', 'NA', 'unknown', 'n/a', 'NaN', 'null', -999, 999, 9999, '']
+        df_clean.replace(missing_indicators, np.nan, inplace=True)
+
+        # drop mostly empty columns
+        missing_percent = df_clean.isna().mean()
+        cols_to_drop = missing_percent[missing_percent > threshold].index
+        if len(cols_to_drop) > 0:
+            df_clean.drop(columns=cols_to_drop, inplace=True)
+            if verbose:
+                st.warning(f"Dropped {len(cols_to_drop)} columns with more than {threshold*100}% missing values")
+
+        numeric_cols = df_clean.select_dtypes(include=np.number).columns
+        cat_cols = df_clean.select_dtypes(exclude=np.number).columns
+
+        # numeric imputation
+        if not numeric_cols.empty and df_clean[numeric_cols].isna().any().any():
+            if numeric_strategy == 'knn' or (numeric_strategy == 'auto' and len(df_clean) <= 5000 and df_clean.shape[1] <= 50):
+                if verbose:
+                    st.info("Using KNN imputer for numeric columns")
+                imputer = KNNImputer(n_neighbors=min(5, max(3, len(df_clean)//1000)))
+            else:
+                if verbose:
+                    st.info("Using MICE imputer for numeric columns")
+                imputer = IterativeImputer(max_iter=10, random_state=42)
+
+            df_clean[numeric_cols] = imputer.fit_transform(df_clean[numeric_cols])
+
+        # categorical imputation
+        for col in cat_cols:
+            if df_clean[col].isna().any():
+                if df_clean[col].nunique() < 0.5 * len(df_clean):
+                    mode_val = df_clean[col].mode()[0] if not df_clean[col].mode().empty else 'Missing'
+                    df_clean[col] = df_clean[col].fillna(mode_val)
+                else:
+                    df_clean[col] = df_clean[col].fillna('Missing')
+
+        if verbose:
+            st.success(f"Imputed {len(numeric_cols)} numeric and {len(cat_cols)} categorical columns")
+
+        return None if inplace else df_clean
+
+    except Exception as e:
+        if verbose:
+            st.error(f"Error during missing value handling: {str(e)}")
+        raise
+
 # get stats summary
 def get_dataframe_stats(df):
     """Returns key statistics about the DataFrame."""
@@ -243,6 +325,20 @@ st.markdown("Upload a csv file to clean it using the pipeline.")
 # sidebar settings
 with st.sidebar:
     st.header("Settings")
+
+    st.subheader("Missing Value Handler")
+    missing_threshold = st.slider(
+        "Drop columns with missing % >",
+        0, 100, 30,
+        help="Columns with more than this percentage of missing values will be dropped"
+    ) / 100
+
+    numeric_strategy = st.selectbox(
+        "Numeric Imputation Strategy",
+        ['auto', 'knn', 'mice'],
+        help="auto: KNN for small datasets, MICE for large ones"
+    )
+
     st.subheader("Smart Cleaner")
     conversion_threshold = st.slider(
         "Conversion Threshold %",
@@ -262,15 +358,24 @@ st.divider()
 # file upload
 st.subheader("Upload your data file")
 uploaded_file = st.file_uploader(
-    "Choose a CSV file",
-    type=['csv'],
-    help="Upload a CSV file containing missing values etc"
+    "Choose a CSV or Excel file",
+    type=['csv', 'xlsx', 'xls'],
+    help="Upload a CSV or Excel file that needs cleaning"
 )
 
 if uploaded_file is not None:
     st.success("File uploaded successfully!")
     try:
-        df = pd.read_csv(uploaded_file)
+        # read based on file type
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+
+        if file_extension == 'csv':
+            df = pd.read_csv(uploaded_file, quotechar='"', skipinitialspace=True)
+        elif file_extension in ['xlsx', 'xls']:
+            df = pd.read_excel(uploaded_file)
+        else:
+            st.error("Unsupported file format. Please upload a CSV or Excel file.")
+            st.stop()
 
         # init session state
         if 'original_df' not in st.session_state:
@@ -379,7 +484,7 @@ if uploaded_file is not None:
 
         # advanced cleaning
         st.write("**Advanced Cleaning**")
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             if st.button("Smart Column Cleaner", use_container_width=True,
@@ -396,18 +501,42 @@ if uploaded_file is not None:
                     st.error(f"Error: {str(e)}")
 
         with col2:
-            if st.button("Run Basic Pipeline", use_container_width=True,
-                        help="Strip whitespace, remove duplicates, clean strings, smart convert"):
+            if st.button("Handle Missing Values", use_container_width=True,
+                        help="Intelligent imputation using KNN/MICE"):
                 try:
-                    with st.spinner("Running basic cleaning pipeline..."):
+                    with st.spinner("Handling missing values, this may take a moment..."):
+                        st.session_state.current_df = missing_value_handler(
+                            st.session_state.current_df,
+                            threshold=missing_threshold,
+                            numeric_strategy=numeric_strategy,
+                            verbose=True
+                        )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+        with col3:
+            if st.button("Full Pipeline", use_container_width=True,
+                        help="Apply all cleaning operations in optimal order"):
+                try:
+                    with st.spinner("Running full cleaning pipeline..."):
                         df_temp = st.session_state.current_df.copy()
+
+                        # optimal cleaning order
                         df_temp = strip_whitespace(df_temp)
                         df_temp = remove_duplicate_rows(df_temp)
                         df_temp = remove_duplicate_columns(df_temp)
                         df_temp = clean_string_edges(df_temp, threshold=0.7, verbose=False)
                         df_temp = smart_column_cleaner(df_temp, conversion_threshold=conversion_threshold, verbose=False)
+                        df_temp = missing_value_handler(
+                            df_temp,
+                            threshold=missing_threshold,
+                            numeric_strategy=numeric_strategy,
+                            verbose=False
+                        )
+
                         st.session_state.current_df = df_temp
-                        st.success("Basic pipeline completed!")
+                        st.success("Full pipeline completed successfully!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
@@ -472,11 +601,11 @@ else:
     # sample format
     with st.expander("Sample Data Format"):
         sample_df = pd.DataFrame({
-            'name': ['  Alice  ', 'Bob', 'Charlie'],
-            'price': ['$100', '€200.50', '£300'],
-            'percentage': ['75%', '80.5%', '99%'],
-            'weight': ['100kg', '150.5 lbs', '200g'],
-            'duration': ['1h30m', '90min', '2 hours']
+            'name': ['  Alice  ', 'Bob', 'Charlie', 'Alice'],
+            'price': ['$100', '$200.50', '€300', '$100'],
+            'percentage': ['75%', '80.5%', '99%', '75%'],
+            'weight': ['100kg', '150.5 lbs', '?', '100kg'],
+            'duration': ['1h30m', '90min', 'NA', '1h30m']
         })
         st.dataframe(sample_df, use_container_width=True)
-        st.caption("The pipeline can handle currency, percentages, units, and durations automatically!")
+        st.caption("The pipeline can handle currency, percentages, units, and missing values automatically!")
