@@ -76,8 +76,7 @@ st.markdown("""
 def validate_df(df: pd.DataFrame):
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a pandas DataFrame")
-    if df.empty:
-        raise ValueError("DataFrame is empty")
+    # empty df is allowed, operations just return it unchanged
 
 # remove duplicate rows
 def remove_duplicate_rows(df: pd.DataFrame):
@@ -198,7 +197,7 @@ def smart_column_cleaner(
 
                 converted = pd.to_numeric(cleaned, errors='coerce')
                 if converted.notna().mean() > conversion_threshold:
-                    df_clean[col] = converted
+                    df_clean[col] = converted.reindex(df_clean.index)
                     conversions.append(f"{col} (currency)")
                     continue
 
@@ -208,7 +207,7 @@ def smart_column_cleaner(
                 cleaned = cleaned.str.replace(r'[^\d.\-]', '', regex=True)
                 converted = pd.to_numeric(cleaned, errors='coerce') / 100
                 if converted.notna().mean() > conversion_threshold:
-                    df_clean[col] = converted
+                    df_clean[col] = converted.reindex(df_clean.index)
                     conversions.append(f"{col} (percentage)")
                     continue
 
@@ -218,7 +217,7 @@ def smart_column_cleaner(
                 cleaned = non_empty.str.extract(r'([-]?\d+\.?\d*)', expand=False)
                 converted = pd.to_numeric(cleaned, errors='coerce')
                 if converted.notna().mean() > conversion_threshold:
-                    df_clean[col] = converted
+                    df_clean[col] = converted.reindex(df_clean.index)
                     conversions.append(f"{col} (unit)")
                     continue
 
@@ -241,7 +240,7 @@ def smart_column_cleaner(
 
                 converted = non_empty.apply(convert_duration)
                 if converted.notna().mean() > conversion_threshold:
-                    df_clean[col] = converted
+                    df_clean[col] = converted.reindex(df_clean.index)
                     conversions.append(f"{col} (duration to seconds)")
                     continue
 
@@ -249,7 +248,7 @@ def smart_column_cleaner(
             cleaned = non_empty.str.replace(r'[^\d.\-]', '', regex=True)
             converted = pd.to_numeric(cleaned, errors='coerce')
             if converted.notna().mean() > conversion_threshold:
-                df_clean[col] = converted
+                df_clean[col] = converted.reindex(df_clean.index)
                 conversions.append(f"{col} (numeric)")
 
         if verbose and conversions:
@@ -298,13 +297,13 @@ def missing_value_handler(
 
         # convert missing indicators
         missing_indicators = ['?', 'NA', 'unknown', 'n/a', 'NaN', 'null', -999, 999, 9999, '']
-        df_clean.replace(missing_indicators, np.nan, inplace=True)
+        df_clean = df_clean.replace(missing_indicators, np.nan)
 
         # drop mostly empty columns
         missing_percent = df_clean.isna().mean()
         cols_to_drop = missing_percent[missing_percent > threshold].index
         if len(cols_to_drop) > 0:
-            df_clean.drop(columns=cols_to_drop, inplace=True)
+            df_clean = df_clean.drop(columns=cols_to_drop)
             if verbose:
                 st.warning(f"Dropped {len(cols_to_drop)} columns with more than {threshold*100}% missing values")
 
@@ -316,11 +315,18 @@ def missing_value_handler(
             if numeric_strategy == 'knn' or (numeric_strategy == 'auto' and len(df_clean) <= 5000 and df_clean.shape[1] <= 50):
                 if verbose:
                     st.info("Using KNN imputer for numeric columns")
-                imputer = KNNImputer(n_neighbors=min(5, max(3, len(df_clean)//1000)))
+                n_neighbors = max(1, min(5, max(1, len(df_clean) // 1000), len(df_clean)))
+                imputer = KNNImputer(n_neighbors=n_neighbors)
             else:
-                if verbose:
-                    st.info("Using MICE imputer for numeric columns")
-                imputer = IterativeImputer(max_iter=10, random_state=42)
+                # MICE needs at least 2 numeric columns to model relationships between them
+                if len(numeric_cols) >= 2:
+                    if verbose:
+                        st.info("Using MICE imputer for numeric columns")
+                    imputer = IterativeImputer(max_iter=10, random_state=42)
+                else:
+                    if verbose:
+                        st.info("Not enough numeric columns for MICE, using KNN instead")
+                    imputer = KNNImputer(n_neighbors=max(1, min(3, len(df_clean))))
 
             df_clean[numeric_cols] = imputer.fit_transform(df_clean[numeric_cols])
 
@@ -361,7 +367,7 @@ def validate_email_col(
     if action == 'flag':
         df_clean[f'{col}_valid_email'] = is_valid
     elif action == 'remove':
-        df_clean = df_clean[is_valid]
+        df_clean = df_clean[is_valid].reset_index(drop=True)
 
     return df_clean
 
@@ -473,7 +479,7 @@ def cap_outliers(
         df_clean[col] = df_clean[col].clip(lower=lower, upper=upper)
     elif action == 'remove':
         mask = df_clean[col].isna() | ((df_clean[col] >= lower) & (df_clean[col] <= upper))
-        df_clean = df_clean[mask]
+        df_clean = df_clean[mask].reset_index(drop=True)
 
     return df_clean
 
@@ -498,7 +504,7 @@ def validate_range(
     if action == 'flag':
         df_clean[f'{col}_in_range'] = in_range
     elif action == 'remove':
-        df_clean = df_clean[in_range]
+        df_clean = df_clean[in_range].reset_index(drop=True)
 
     return df_clean
 
@@ -509,20 +515,26 @@ def find_and_replace(df: pd.DataFrame, col: str, find: str, replace: str, use_re
     if col not in df.columns:
         raise ValueError(f"Column '{col}' not found")
     df_clean = df.copy()
-    df_clean[col] = df_clean[col].astype(str).str.replace(find, replace, regex=use_regex)
+    # only touch non-null values so existing NaNs are not turned into the string nan
+    mask = df_clean[col].notna()
+    df_clean.loc[mask, col] = df_clean.loc[mask, col].astype(str).str.replace(find, replace, regex=use_regex)
     return df_clean
 
-# save state for undo
-def push_history(label: str):
-    """Save current df state to undo history with a label."""
+# snapshot before an operation
+def snapshot():
+    """Takes a snapshot of current_df. Pass the result to commit_history() once the operation succeeds."""
+    return st.session_state.current_df.copy()
+
+# commit a snapshot after success
+def commit_history(label, snap):
+    """Commits a previously taken snapshot to history. Only call this after the operation succeeds."""
     if 'history' not in st.session_state:
         st.session_state.history = []
     if len(st.session_state.history) >= 20:
         st.session_state.history.pop(0)
-    st.session_state.history.append({
-        'label': label,
-        'df': st.session_state.current_df.copy()
-    })
+    st.session_state.history.append({'label': label, 'df': snap})
+    # bumps a counter used as a cheap cache key for the excel export
+    st.session_state['history_len'] = st.session_state.get('history_len', 0) + 1
 
 # restore previous state
 def undo_last():
@@ -530,6 +542,7 @@ def undo_last():
     if st.session_state.get('history'):
         last = st.session_state.history.pop()
         st.session_state.current_df = last['df']
+        st.session_state['history_len'] = st.session_state.get('history_len', 0) + 1
         return last['label']
     return None
 
@@ -1027,6 +1040,11 @@ else:
         # reset state when sheet changes or on first load
         state_key = f"state_{load_key}"
         if st.session_state.get("state_key_id") != state_key:
+            # clear stale checkbox widget keys from the previous sheet, avoids ghost selections
+            stale_keys = [k for k in st.session_state.keys()
+                          if k.startswith(("_vc_", "_va_", "_rc_", "_ra_", "_widget_all_", "_widget_chk_"))]
+            for k in stale_keys:
+                del st.session_state[k]
             st.session_state.update({
                 "original_df": df.copy(),
                 "current_df": df.copy(),
@@ -1275,7 +1293,7 @@ else:
                                 selected_cols = st.session_state.selected_columns.get(action_key, [])
                                 try:
                                     with st.spinner(f"Fixing {len(selected_cols)} column(s)..."):
-                                        push_history(f"Fix: {action_key}")
+                                        _snap = snapshot()
                                         df_temp = st.session_state.current_df.copy()
 
                                         if action_key == "strip_whitespace":
@@ -1337,6 +1355,7 @@ else:
                                                         df_temp[c] = df_subset[c]
 
                                         st.session_state.current_df = df_temp
+                                        commit_history(f"Fix: {action_key}", _snap)
                                         st.session_state.selected_columns.pop(action_key, None)
                                         st.session_state.last_success_msg = f"Fixed {action_key} on {len(selected_cols)} column(s)!"
                                     st.rerun()
@@ -1352,12 +1371,14 @@ else:
                             if st.button("Fix This", key=f"fix_{action_key}", use_container_width=True, type="primary"):
                                 try:
                                     with st.spinner("Fixing..."):
-                                        push_history(f"Fix: {action_key}")
+                                        _snap = snapshot()
                                         if action_key == "drop_duplicates":
                                             st.session_state.current_df = remove_duplicate_rows(st.session_state.current_df)
+                                            commit_history(f"Fix: {action_key}", _snap)
                                             st.session_state.last_success_msg = "Duplicate rows removed!"
                                         elif action_key == "drop_dup_cols":
                                             st.session_state.current_df = remove_duplicate_columns(st.session_state.current_df)
+                                            commit_history(f"Fix: {action_key}", _snap)
                                             st.session_state.last_success_msg = "Duplicate columns removed!"
                                     st.rerun()
                                 except Exception as e:
@@ -1367,8 +1388,8 @@ else:
 
                 if st.button("Auto-Fix All Issues", key="auto_fix_all", use_container_width=True, type="primary"):
                     try:
+                        _snap = snapshot()
                         with st.spinner("Running complete cleaning pipeline..."):
-                            push_history("Auto-Fix All")
                             df_temp = st.session_state.current_df.copy()
                             df_temp = strip_whitespace(df_temp)
                             df_temp = remove_duplicate_rows(df_temp)
@@ -1377,6 +1398,7 @@ else:
                             df_temp = smart_column_cleaner(df_temp, conversion_threshold=conversion_threshold, verbose=False)
                             df_temp = missing_value_handler(df_temp, threshold=missing_threshold, numeric_strategy=numeric_strategy, verbose=False)
                             st.session_state.current_df = df_temp
+                            commit_history("Auto-Fix All", _snap)
                             st.session_state.selected_columns = {}
                             st.session_state.last_success_msg = "All issues fixed automatically!"
                         st.rerun()
@@ -1394,8 +1416,9 @@ else:
                 if st.button("Strip Whitespace", key="ws_btn", use_container_width=True,
                              help="Removes leading and trailing spaces from all text columns. e.g. '  Alice ' becomes 'Alice'."):
                     try:
-                        push_history("Strip Whitespace")
+                        _snap = snapshot()
                         st.session_state.current_df = strip_whitespace(st.session_state.current_df)
+                        commit_history("Strip Whitespace", _snap)
                         st.session_state.last_success_msg = "Whitespace stripped from text columns!"
                         st.rerun()
                     except Exception as e:
@@ -1405,9 +1428,10 @@ else:
                 if st.button("Drop Duplicate Rows", key="ddr_btn", use_container_width=True,
                              help="Removes rows that are completely identical to another row. Keeps the first occurrence."):
                     try:
+                        _snap = snapshot()
                         before_rows = st.session_state.current_df.shape[0]
-                        push_history("Drop Duplicate Rows")
                         st.session_state.current_df = remove_duplicate_rows(st.session_state.current_df)
+                        commit_history("Drop Duplicate Rows", _snap)
                         after_rows = st.session_state.current_df.shape[0]
                         st.session_state.last_success_msg = f"Dropped {before_rows-after_rows} duplicate rows!"
                         st.rerun()
@@ -1418,9 +1442,10 @@ else:
                 if st.button("Drop Duplicate Columns", key="ddc_btn", use_container_width=True,
                              help="Removes columns that share a name or have identical values to another column."):
                     try:
+                        _snap = snapshot()
                         before_cols = st.session_state.current_df.shape[1]
-                        push_history("Drop Duplicate Columns")
                         st.session_state.current_df = remove_duplicate_columns(st.session_state.current_df)
+                        commit_history("Drop Duplicate Columns", _snap)
                         after_cols = st.session_state.current_df.shape[1]
                         st.session_state.last_success_msg = f"Dropped {before_cols-after_cols} duplicate columns!"
                         st.rerun()
@@ -1431,13 +1456,14 @@ else:
                 if st.button("Clean String Edges", key="cse_btn", use_container_width=True,
                              help="Removes unwanted special characters from the start and end of text values. e.g. '$hello$' becomes 'hello'."):
                     try:
-                        push_history("Clean String Edges")
+                        _snap = snapshot()
                         with st.spinner("Cleaning string edges..."):
                             st.session_state.current_df = clean_string_edges(
                                 st.session_state.current_df,
                                 threshold=0.7,
                                 verbose=False
                             )
+                        commit_history("Clean String Edges", _snap)
                         st.session_state.last_success_msg = "String edges cleaned!"
                         st.rerun()
                     except Exception as e:
@@ -1453,13 +1479,14 @@ else:
                 if st.button("Smart Column Cleaner", key="scc_btn", use_container_width=True,
                             help="Auto-detects and converts columns that look like currency, percentages, units, or durations into proper numeric values."):
                     try:
-                        push_history("Smart Column Cleaner")
+                        _snap = snapshot()
                         with st.spinner("Analyzing and converting columns..."):
                             st.session_state.current_df = smart_column_cleaner(
                                 st.session_state.current_df,
                                 conversion_threshold=conversion_threshold,
                                 verbose=False
                             )
+                        commit_history("Smart Column Cleaner", _snap)
                         st.session_state.last_success_msg = "Columns converted!"
                         st.rerun()
                     except Exception as e:
@@ -1469,7 +1496,7 @@ else:
                 if st.button("Handle Missing Values", key="hmv_btn", use_container_width=True,
                             help="Fills gaps using KNN imputation for numeric columns (estimates from nearby similar rows) and the most common value for text columns."):
                     try:
-                        push_history("Handle Missing Values")
+                        _snap = snapshot()
                         with st.spinner("Handling missing values, this may take a moment..."):
                             st.session_state.current_df = missing_value_handler(
                                 st.session_state.current_df,
@@ -1477,6 +1504,7 @@ else:
                                 numeric_strategy=numeric_strategy,
                                 verbose=False
                             )
+                        commit_history("Handle Missing Values", _snap)
                         st.session_state.last_success_msg = "Missing values handled!"
                         st.rerun()
                     except Exception as e:
@@ -1486,7 +1514,7 @@ else:
                 if st.button("Full Pipeline", key="fp_btn", use_container_width=True,
                             help="Apply all cleaning operations in optimal order"):
                     try:
-                        push_history("Full Pipeline")
+                        _snap = snapshot()
                         with st.spinner("Running full cleaning pipeline..."):
                             df_temp = st.session_state.current_df.copy()
                             df_temp = strip_whitespace(df_temp)
@@ -1501,6 +1529,7 @@ else:
                                 verbose=False
                             )
                             st.session_state.current_df = df_temp
+                        commit_history("Full Pipeline", _snap)
                         st.session_state.last_success_msg = "Full pipeline completed successfully!"
                         st.rerun()
                     except Exception as e:
@@ -1541,7 +1570,7 @@ else:
                              type="primary" if fr_find else "secondary",
                              disabled=not fr_find):
                     try:
-                        push_history(f"Find & Replace in {fr_col}")
+                        _snap = snapshot()
                         st.session_state.current_df = find_and_replace(
                             st.session_state.current_df,
                             col=fr_col,
@@ -1549,6 +1578,7 @@ else:
                             replace=fr_replace,
                             use_regex=fr_regex
                         )
+                        commit_history(f"Find & Replace in {fr_col}", _snap)
                         st.session_state.last_success_msg = f"Find & Replace done on column '{fr_col}'!"
                         st.rerun()
                     except Exception as e:
@@ -1575,7 +1605,7 @@ else:
                 st.write("")
                 if st.button("Apply", key="ov_apply", type="primary", use_container_width=True):
                     try:
-                        push_history(f"Type Override: {ov_col} -> {ov_type}")
+                        _snap = snapshot()
                         df_temp = st.session_state.current_df.copy()
                         col_data = df_temp[ov_col]
                         if ov_type == "string (object)":
@@ -1593,6 +1623,7 @@ else:
                         elif ov_type == "category":
                             df_temp[ov_col] = col_data.astype("category")
                         st.session_state.current_df = df_temp
+                        commit_history(f"Type Override: {ov_col} -> {ov_type}", _snap)
                         st.session_state.last_success_msg = f"Column '{ov_col}' cast to {ov_type}!"
                         st.rerun()
                     except Exception as e:
@@ -1619,12 +1650,13 @@ else:
                     if st.button("Run", key="run_email_val", use_container_width=True,
                                  disabled=n_email == 0, type="primary" if n_email > 0 else "secondary"):
                         try:
-                            push_history("Validate Email")
+                            _snap = snapshot()
                             action_key = 'flag' if 'Flag' in email_action else 'remove'
                             df_temp = st.session_state.current_df.copy()
                             for col in st.session_state.val_selected["email"]:
                                 df_temp = validate_email_col(df_temp, col, action=action_key)
                             st.session_state.current_df = df_temp
+                            commit_history("Validate Email", _snap)
                             st.session_state.val_selected.pop("email", None)
                             st.session_state.last_success_msg = f"Email validation done on {n_email} column(s)!"
                             st.rerun()
@@ -1645,11 +1677,12 @@ else:
                     if st.button("Run", key="run_phone_val", use_container_width=True,
                                  disabled=n_phone == 0, type="primary" if n_phone > 0 else "secondary"):
                         try:
-                            push_history("Standardize Phone")
+                            _snap = snapshot()
                             df_temp = st.session_state.current_df.copy()
                             for col in st.session_state.val_selected["phone"]:
                                 df_temp = validate_phone_col(df_temp, col)
                             st.session_state.current_df = df_temp
+                            commit_history("Standardize Phone", _snap)
                             st.session_state.val_selected.pop("phone", None)
                             st.session_state.last_success_msg = f"Phone numbers standardized in {n_phone} column(s)!"
                             st.rerun()
@@ -1676,11 +1709,12 @@ else:
                     if st.button("Run", key="run_date_val", use_container_width=True,
                                  disabled=n_date == 0, type="primary" if n_date > 0 else "secondary"):
                         try:
-                            push_history("Standardize Dates")
+                            _snap = snapshot()
                             df_temp = st.session_state.current_df.copy()
                             for col in st.session_state.val_selected["date"]:
                                 df_temp = validate_date_col(df_temp, col, output_format=date_fmt)
                             st.session_state.current_df = df_temp
+                            commit_history("Standardize Dates", _snap)
                             st.session_state.val_selected.pop("date", None)
                             st.session_state.last_success_msg = f"Dates standardized to {date_fmt} in {n_date} column(s)!"
                             st.rerun()
@@ -1697,12 +1731,21 @@ else:
                 with v1:
                     o1, o2, o3 = st.columns(3)
                     with o1:
-                        outlier_method = st.selectbox("Method", ["iqr", "zscore"], key="outlier_method")
+                        outlier_method = st.selectbox(
+                            "Method", ["iqr", "zscore"], key="outlier_method",
+                            help="IQR uses the spread of the middle 50% of data, good for skewed data and most cases. Z-score uses standard deviations from the mean, better for normally distributed data."
+                        )
                     with o2:
-                        outlier_action = st.selectbox("Action", ["cap", "remove"], key="outlier_action")
+                        outlier_action = st.selectbox(
+                            "Action", ["cap", "remove"], key="outlier_action",
+                            help="Cap clips outliers to the boundary value instead of deleting them, safer, keeps row count. Remove deletes the entire row containing the outlier."
+                        )
                     with o3:
-                        outlier_thresh = st.number_input("Threshold", min_value=0.5, max_value=10.0,
-                                                         value=1.5, step=0.5, key="outlier_thresh")
+                        outlier_thresh = st.number_input(
+                            "Threshold", min_value=0.5, max_value=10.0,
+                            value=1.5, step=0.5, key="outlier_thresh",
+                            help="For IQR: multiplier of the IQR range, 1.5 is standard, 3.0 is more lenient. For Z-score: number of standard deviations, 2.0 catches about 5% of data, 3.0 catches about 0.3%."
+                        )
                 with v2:
                     n_outlier = col_popover("outlier", num_cols)
                 with v3:
@@ -1711,13 +1754,14 @@ else:
                     if st.button("Run", key="run_outlier", use_container_width=True,
                                  disabled=n_outlier == 0, type="primary" if n_outlier > 0 else "secondary"):
                         try:
-                            push_history("Cap Outliers")
+                            _snap = snapshot()
                             before = len(st.session_state.current_df)
                             df_temp = st.session_state.current_df.copy()
                             for col in st.session_state.val_selected["outlier"]:
                                 df_temp = cap_outliers(df_temp, col=col, method=outlier_method,
                                                        action=outlier_action, threshold=outlier_thresh)
                             st.session_state.current_df = df_temp
+                            commit_history("Cap Outliers", _snap)
                             after = len(st.session_state.current_df)
                             st.session_state.val_selected.pop("outlier", None)
                             if outlier_action == 'cap':
@@ -1742,7 +1786,10 @@ else:
                     with r2:
                         range_max = st.number_input("Max value", value=100.0, key="range_max")
                     with r3:
-                        range_action = st.selectbox("Action", ["flag", "remove"], key="range_action")
+                        range_action = st.selectbox(
+                            "Action", ["flag", "remove"], key="range_action",
+                            help="Flag adds a new boolean column showing which rows are in range, non-destructive. Remove deletes rows where the value falls outside the min/max."
+                        )
                 with v2:
                     n_range = col_popover("range", num_cols)
                 with v3:
@@ -1751,7 +1798,7 @@ else:
                     if st.button("Run", key="run_range_val", use_container_width=True,
                                  disabled=n_range == 0, type="primary" if n_range > 0 else "secondary"):
                         try:
-                            push_history("Validate Range")
+                            _snap = snapshot()
                             before = len(st.session_state.current_df)
                             df_temp = st.session_state.current_df.copy()
                             for col in st.session_state.val_selected["range"]:
@@ -1759,6 +1806,7 @@ else:
                                                          min_val=range_min, max_val=range_max,
                                                          action=range_action)
                             st.session_state.current_df = df_temp
+                            commit_history("Validate Range", _snap)
                             after = len(st.session_state.current_df)
                             st.session_state.val_selected.pop("range", None)
                             if range_action == 'flag':
@@ -1781,6 +1829,7 @@ else:
                 st.session_state.current_df = st.session_state.original_df.copy()
                 st.session_state.selected_columns = {}
                 st.session_state.history = []
+                st.session_state["history_len"] = st.session_state.get("history_len", 0) + 1
                 st.session_state.last_success_msg = "Data reset to original!"
                 st.rerun()
 
@@ -1802,14 +1851,20 @@ else:
                 )
 
             with col2:
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    st.session_state.current_df.to_excel(writer, index=False, sheet_name='Cleaned Data')
-                    st.session_state.original_df.to_excel(writer, index=False, sheet_name='Original Data')
+                # only regenerate excel bytes when the df actually changes
+                # history_len bumps on every commit_history call, a cheap cache key
+                excel_cache_key = st.session_state.get("history_len", 0)
+                if st.session_state.get("_excel_cache_key") != excel_cache_key:
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        st.session_state.current_df.to_excel(writer, index=False, sheet_name='Cleaned Data')
+                        st.session_state.original_df.to_excel(writer, index=False, sheet_name='Original Data')
+                    st.session_state["_excel_bytes"] = buffer.getvalue()
+                    st.session_state["_excel_cache_key"] = excel_cache_key
 
                 st.download_button(
                     label="Download as Excel",
-                    data=buffer.getvalue(),
+                    data=st.session_state["_excel_bytes"],
                     file_name="cleaned_data.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_button",
