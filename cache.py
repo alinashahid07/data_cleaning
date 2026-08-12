@@ -297,6 +297,7 @@ def get_type_suggestions(df):
                 "confidence": round(currency_like.mean() * 100),
                 "sample": ", ".join(str_series.head(3).tolist()),
             })
+            
             continue
 
         # percentage detection

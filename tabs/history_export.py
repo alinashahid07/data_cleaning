@@ -8,6 +8,7 @@ from pipeline import (
     import_pipeline_json,
     undo_last,
 )
+from reporting import build_report_pdf
 
 def _render_reset():
     st.subheader("Reset Data")
@@ -166,11 +167,51 @@ def _render_python_export(hist):
     with st.expander("Preview script", expanded=False):
         st.code(script, language="python")
 
+def _render_report_pdf(cdf, hist, filename):
+    st.subheader("Export Cleaning Report")
+    st.caption(
+        "Generates a PDF report with a before and after summary, "
+        "column profiles, missing value breakdown, cleaning steps, "
+        "and a sample of the cleaned data."
+    )
+    if not hist:
+        st.caption("Run at least one cleaning operation to generate a report.")
+        return
+
+    if st.button("Generate Report", key="gen_pdf", type="primary", use_container_width=True):
+        try:
+            with st.spinner("Building report..."):
+                pdf_bytes = build_report_pdf(
+                    original_df=st.session_state.original_df,
+                    cleaned_df=cdf,
+                    history=hist,
+                    filename=filename,
+                )
+            st.session_state["_pdf_bytes"] = pdf_bytes
+            st.session_state["_pdf_ready"] = True
+        except Exception as e:
+            st.error(f"Could not generate PDF: {e}")
+            st.session_state["_pdf_ready"] = False
+
+    if st.session_state.get("_pdf_ready") and st.session_state.get("_pdf_bytes"):
+        st.success("Report ready.")
+        st.download_button(
+            "Download cleaning_report.pdf",
+            data=st.session_state["_pdf_bytes"],
+            file_name="cleaning_report.pdf",
+            mime="application/pdf",
+            key="dl_pdf",
+            use_container_width=True,
+        )
+
 def render(tab, cdf, settings):
+    filename = settings.get("filename", "dataset")
     with tab:
         _render_reset()
         st.divider()
         _render_download(cdf)
+        st.divider()
+        _render_report_pdf(cdf, st.session_state.get("history", []), filename)
         st.divider()
         _render_history(st.session_state.get("history", []))
         st.divider()

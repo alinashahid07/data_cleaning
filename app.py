@@ -90,8 +90,8 @@ else:
             "missing_threshold": missing_threshold,
             "numeric_strategy": numeric_strategy,
             "conversion_threshold": conversion_threshold,
+            "filename": uploaded.name,
         }
-        
         history_export.render(tab_history, cdf, pipeline_settings)
 
     except Exception as e:
