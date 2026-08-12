@@ -1,6 +1,8 @@
 import pandas as pd
 import streamlit as st
+from cache import get_type_suggestions
 from cleaning import (
+    apply_type_suggestions,
     clean_string_edges,
     remove_duplicate_columns,
     remove_duplicate_rows,
@@ -345,6 +347,78 @@ def _render_rename_columns(cdf, all_cols):
     if st.session_state.get("_omsg", ("",))[0] == "rn_apply":
         st.success(st.session_state.pop("_omsg")[1])
 
+def _render_type_guesser(cdf):
+    st.write("**Data Type Guesser**")
+    st.caption(
+        "Scans every column and suggests the correct type based on what the values actually look like. "
+        "Select the suggestions you want to apply then press Apply Selected."
+    )
+    suggestions = get_type_suggestions(cdf)
+    if not suggestions:
+        st.success("All columns already look like the right type. Nothing to suggest.")
+        return
+
+    if "type_guesser_selected" not in st.session_state:
+        st.session_state.type_guesser_selected = {}
+
+    rows = []
+    for s in suggestions:
+        checked = st.session_state.type_guesser_selected.get(s["column"], True)
+        rows.append({
+            "Apply": checked,
+            "Column": s["column"],
+            "Current Type": s["current_type"],
+            "Suggested Type": s["suggested_label"],
+            "Confidence": f"{s['confidence']}%",
+            "Reason": s["reason"],
+            "Sample Values": s["sample"],
+        })
+
+    display_df = pd.DataFrame(rows)
+    edited = st.data_editor(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["Column", "Current Type", "Suggested Type", "Confidence", "Reason", "Sample Values"],
+        column_config={
+            "Apply": st.column_config.CheckboxColumn("Apply", default=True),
+            "Confidence": st.column_config.TextColumn("Confidence"),
+        },
+        key="type_guesser_editor",
+    )
+    selected = [suggestions[i] for i, row in edited.iterrows() if row["Apply"]]
+    n_selected = len(selected)
+
+    tg1, tg2 = st.columns([4, 1])
+    with tg1:
+        if n_selected:
+            st.caption(f"{n_selected} suggestion(s) selected. Press Apply to convert.")
+        else:
+            st.caption("Tick at least one suggestion to enable Apply.")
+    with tg2:
+        if st.button(
+            "Apply Selected",
+            key="tg_apply",
+            disabled=n_selected == 0,
+            type="primary" if n_selected else "secondary",
+            use_container_width=True,
+        ):
+            try:
+                _snap = snapshot()
+                result, applied = apply_type_suggestions(cdf, selected)
+                st.session_state.current_df = result
+                st.session_state.type_guesser_selected = {}
+                commit_history(f"Type Guesser: fixed {len(applied)} column(s)", _snap)
+                st.session_state["_omsg"] = (
+                    "tg_apply",
+                    f"Converted {len(applied)} column(s): {', '.join(applied)}.",
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+    if st.session_state.get("_omsg", ("",))[0] == "tg_apply":
+        st.success(st.session_state.pop("_omsg")[1])
+
 def render(tab, cdf, all_cols, missing_threshold, numeric_strategy, conversion_threshold):
     with tab:
         st.subheader("Manual Cleaning Operations")
@@ -361,3 +435,5 @@ def render(tab, cdf, all_cols, missing_threshold, numeric_strategy, conversion_t
         _render_merge_columns(cdf, all_cols)
         st.divider()
         _render_rename_columns(cdf, all_cols)
+        st.divider()
+        _render_type_guesser(cdf)

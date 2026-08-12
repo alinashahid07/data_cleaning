@@ -57,3 +57,66 @@ def rename_columns(df, rename_map):
     if duplicates:
         raise ValueError(f"New names conflict with existing columns: {', '.join(duplicates)}")
     return df.rename(columns=clean_map)
+
+# apply a batch of type guesser suggestions
+def apply_type_suggestions(df, selected_suggestions):
+    """selected_suggestions is a filtered list where the user ticked which ones to apply.
+    Each entry needs column and suggested_action keys."""
+    from .advanced import _convert_duration_val
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+    tmp = df.copy()
+    applied = []
+    for suggestion in selected_suggestions:
+        col = suggestion["column"]
+        action = suggestion["suggested_action"]
+        if col not in tmp.columns:
+            continue
+        s = tmp[col].astype(str).str.strip()
+        non_empty = s.replace("", np.nan).dropna()
+        try:
+            if action == "convert_currency":
+                cleaned = (
+                    non_empty
+                    .str.replace(r"[^\d.,\-()]", " ", regex=True)
+                    .str.replace(r"\s+", " ", regex=True)
+                    .str.replace(r"\((.+?)\)", r"-\1", regex=True)
+                    .str.extract(r"([-]?\d[\d\.,]*)", expand=False)
+                    .str.replace(",", "", regex=False)
+                )
+                tmp[col] = pd.to_numeric(cleaned, errors="coerce").reindex(tmp.index)
+                applied.append(col)
+            elif action == "convert_percentage":
+                cleaned = non_empty.str.replace("%", "", regex=False).str.replace(r"[^\d.\-]", "", regex=True)
+                tmp[col] = (pd.to_numeric(cleaned, errors="coerce") / 100).reindex(tmp.index)
+                applied.append(col)
+            elif action == "convert_units":
+                cleaned = non_empty.str.extract(r"([-]?\d+\.?\d*)", expand=False)
+                tmp[col] = pd.to_numeric(cleaned, errors="coerce").reindex(tmp.index)
+                applied.append(col)
+            elif action == "convert_duration":
+                tmp[col] = non_empty.apply(_convert_duration_val).reindex(tmp.index)
+                applied.append(col)
+            elif action == "convert_datetime":
+                tmp[col] = pd.to_datetime(tmp[col], errors="coerce")
+                applied.append(col)
+            elif action == "convert_numeric":
+                cleaned = non_empty.str.replace(r"[^\d.\-]", "", regex=True)
+                tmp[col] = pd.to_numeric(cleaned, errors="coerce").reindex(tmp.index)
+                applied.append(col)
+            elif action == "convert_to_boolean":
+                tmp[col] = tmp[col].astype(str).str.lower().map(
+                    {"true": True, "1": True, "yes": True, "y": True,
+                     "false": False, "0": False, "no": False, "n": False}
+                )
+                applied.append(col)
+            elif action == "convert_category":
+                tmp[col] = tmp[col].astype("category")
+                applied.append(col)
+            elif action == "validate_email":
+                pattern = r"^[\w\.\+\-]+@[\w\-]+\.[a-zA-Z]{2,}$"
+                tmp[f"{col}_valid_email"] = tmp[col].astype(str).str.strip().str.match(pattern)
+                applied.append(col)
+        except Exception:
+            continue
+    return tmp, applied

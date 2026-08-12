@@ -22,6 +22,7 @@ from .transforms import (
     split_column,
     merge_columns,
     rename_columns,
+    apply_type_suggestions,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "split_column",
     "merge_columns",
     "rename_columns",
+    "apply_type_suggestions",
 ]

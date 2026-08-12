@@ -218,3 +218,175 @@ def get_correlation_data(df, method="pearson"):
         "col_order": num_cols,
         "n_cols": len(num_cols),
     }
+
+# scans every column and suggests a better type with a confidence score
+@st.cache_data(show_spinner=False)
+def get_type_suggestions(df):
+    """Only columns where the current type is wrong or suboptimal get a suggestion."""
+    email_pattern = r"^[\w\.\+\-]+@[\w\-]+\.[a-zA-Z]{2,}$"
+    currency_pattern = r'[$€£¥₹₽₺₩฿]|(USD|EUR|GBP|JPY|CNY|INR|PKR|Rs\.?)'
+    bool_values = {"true", "false", "yes", "no", "1", "0", "y", "n"}
+    suggestions = []
+
+    for col in df.columns:
+        s = df[col]
+        current_type = str(s.dtype)
+        non_null = s.dropna()
+        n = len(non_null)
+        if n == 0:
+            continue
+
+        # already numeric, check if it could be boolean
+        if pd.api.types.is_numeric_dtype(s):
+            unique_vals = set(s.dropna().unique())
+            if unique_vals <= {0, 1, 0.0, 1.0}:
+                suggestions.append({
+                    "column": col,
+                    "current_type": current_type,
+                    "suggested_action": "convert_to_boolean",
+                    "suggested_label": "Boolean",
+                    "reason": "Only contains 0 and 1 values",
+                    "confidence": 99,
+                    "sample": ", ".join(str(v) for v in list(unique_vals)[:4]),
+                })
+            continue
+
+        str_series = non_null.astype(str).str.strip()
+
+        # email detection
+        email_match = str_series.str.match(email_pattern).mean()
+        if email_match >= 0.7:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "validate_email",
+                "suggested_label": "Email",
+                "reason": f"{email_match*100:.0f}% of values look like email addresses",
+                "confidence": round(email_match * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # boolean detection
+        lower = str_series.str.lower()
+        bool_match = lower.isin(bool_values).mean()
+        if bool_match >= 0.7:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_to_boolean",
+                "suggested_label": "Boolean",
+                "reason": f"{bool_match*100:.0f}% of values are true/false/yes/no",
+                "confidence": round(bool_match * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # currency detection
+        currency_like = (
+            str_series.str.contains(r"\d", regex=True)
+            & str_series.str.contains(currency_pattern, case=False, regex=True)
+        )
+        if currency_like.mean() >= 0.6:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_currency",
+                "suggested_label": "Numeric (currency)",
+                "reason": f"{currency_like.mean()*100:.0f}% of values look like currency amounts",
+                "confidence": round(currency_like.mean() * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # percentage detection
+        pct_match = str_series.str.contains("%").mean()
+        if pct_match >= 0.6:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_percentage",
+                "suggested_label": "Numeric (percentage)",
+                "reason": f"{pct_match*100:.0f}% of values contain a % symbol",
+                "confidence": round(pct_match * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # unit measurement detection
+        unit_match = str_series.str.contains(
+            r"\d+\s?(kg|g|mg|cm|mm|km|ml|l|lb|lbs|oz|kgs)", case=False, regex=True
+        ).mean()
+        if unit_match >= 0.6:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_units",
+                "suggested_label": "Numeric (measurement)",
+                "reason": f"{unit_match*100:.0f}% of values contain a measurement unit",
+                "confidence": round(unit_match * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # duration detection
+        duration_match = str_series.str.contains(
+            r"(h|hr|hour|min|minute|sec|second)", case=False, regex=True
+        ).mean()
+        if duration_match >= 0.6:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_duration",
+                "suggested_label": "Numeric (duration in seconds)",
+                "reason": f"{duration_match*100:.0f}% of values look like time durations",
+                "confidence": round(duration_match * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # datetime detection
+        date_sample = str_series.head(20)
+        parsed = pd.to_datetime(date_sample, errors="coerce")
+        date_match = parsed.notna().mean()
+        if date_match >= 0.6:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_datetime",
+                "suggested_label": "Datetime",
+                "reason": f"{date_match*100:.0f}% of sampled values parse as dates",
+                "confidence": round(date_match * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # plain numeric string detection
+        cleaned = str_series.str.replace(r"[^\d.\-]", "", regex=True).replace("", np.nan)
+        numeric_match = pd.to_numeric(cleaned, errors="coerce").notna().mean()
+        if numeric_match >= 0.7:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_numeric",
+                "suggested_label": "Numeric",
+                "reason": f"{numeric_match*100:.0f}% of values are numeric strings",
+                "confidence": round(numeric_match * 100),
+                "sample": ", ".join(str_series.head(3).tolist()),
+            })
+            continue
+
+        # low cardinality category detection
+        unique_ratio = s.nunique() / n
+        if unique_ratio <= 0.05 and s.nunique() <= 50:
+            suggestions.append({
+                "column": col,
+                "current_type": current_type,
+                "suggested_action": "convert_category",
+                "suggested_label": "Category",
+                "reason": f"Only {s.nunique()} unique values across {n} rows ({unique_ratio*100:.1f}% unique), storing as category saves memory",
+                "confidence": round((1 - unique_ratio) * 100),
+                "sample": ", ".join(str(v) for v in s.value_counts().head(3).index.tolist()),
+            })
+
+    return sorted(suggestions, key=lambda x: x["confidence"], reverse=True)
