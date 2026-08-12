@@ -391,3 +391,5 @@ def get_type_suggestions(df):
             })
 
     return sorted(suggestions, key=lambda x: x["confidence"], reverse=True)
+
+
