@@ -297,7 +297,6 @@ def get_type_suggestions(df):
                 "confidence": round(currency_like.mean() * 100),
                 "sample": ", ".join(str_series.head(3).tolist()),
             })
-            
             continue
 
         # percentage detection
@@ -392,4 +391,109 @@ def get_type_suggestions(df):
 
     return sorted(suggestions, key=lambda x: x["confidence"], reverse=True)
 
+# scores data quality from 0 to 100 across five weighted dimensions
+@st.cache_data(show_spinner=False)
+def get_quality_score(df):
+    """Each dimension contributes 20 points. Cache busts whenever the dataframe changes,
+    so the score updates live as the user cleans."""
+    total_cells = df.shape[0] * df.shape[1]
+    if total_cells == 0:
+        return {"total": 0, "breakdown": {}}
 
+    n_rows = len(df)
+    n_cols = df.shape[1]
+
+    # completeness, deducted proportionally to the fraction of missing cells
+    missing_frac = df.isna().sum().sum() / total_cells
+    completeness_score = round(20 * (1 - missing_frac))
+
+    # uniqueness, deducted proportionally to the fraction of duplicate rows
+    dup_frac = df.duplicated().sum() / max(n_rows, 1)
+    uniqueness_score = round(20 * (1 - dup_frac))
+
+    # type consistency, flags object columns that mostly hold numeric text
+    inconsistent_cols = 0
+    for col in df.select_dtypes(include="object").columns:
+        s = df[col].dropna().astype(str).str.strip()
+        if len(s) == 0:
+            continue
+        numeric_frac = pd.to_numeric(
+            s.str.replace(r"[^\d.\-]", "", regex=True).replace("", np.nan),
+            errors="coerce"
+        ).notna().mean()
+        if numeric_frac > 0.7:
+            inconsistent_cols += 1
+    type_score = round(max(0, 20 - (inconsistent_cols / max(n_cols, 1)) * 20))
+
+    # outlier cleanliness, uses 3x iqr fences to only flag extreme outliers
+    num_cols = df.select_dtypes(include=np.number).columns
+    outlier_fracs = []
+    for col in num_cols:
+        s = df[col].dropna()
+        if len(s) < 4:
+            continue
+        q1, q3 = s.quantile(0.25), s.quantile(0.75)
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        outlier_frac = ((s < q1 - 3 * iqr) | (s > q3 + 3 * iqr)).mean()
+        outlier_fracs.append(outlier_frac)
+    avg_outlier_frac = float(np.mean(outlier_fracs)) if outlier_fracs else 0.0
+    outlier_score = round(max(0, 20 * (1 - avg_outlier_frac * 5)))
+
+    # validity, checks for placeholder text like none, na, unknown, null
+    invalid_pattern = r"^(none|na|n/a|null|unknown|\?|nan|-|)$"
+    invalid_fracs = []
+    for col in df.select_dtypes(include="object").columns:
+        s = df[col].dropna().astype(str).str.strip().str.lower()
+        if len(s) == 0:
+            continue
+        invalid_frac = s.str.match(invalid_pattern, na=False).mean()
+        invalid_fracs.append(invalid_frac)
+    avg_invalid_frac = float(np.mean(invalid_fracs)) if invalid_fracs else 0.0
+    validity_score = round(max(0, 20 * (1 - avg_invalid_frac * 3)))
+
+    total = min(100, completeness_score + uniqueness_score + type_score + outlier_score + validity_score)
+
+    def grade(s):
+        if s >= 18:
+            return "good"
+        if s >= 12:
+            return "fair"
+        return "poor"
+
+    return {
+        "total": total,
+        "breakdown": {
+            "Completeness": {
+                "score": completeness_score,
+                "max": 20,
+                "grade": grade(completeness_score),
+                "detail": f"{int(missing_frac * total_cells)} missing cells ({missing_frac*100:.1f}%)",
+            },
+            "Uniqueness": {
+                "score": uniqueness_score,
+                "max": 20,
+                "grade": grade(uniqueness_score),
+                "detail": f"{int(dup_frac * n_rows)} duplicate rows ({dup_frac*100:.1f}%)",
+            },
+            "Type Consistency": {
+                "score": type_score,
+                "max": 20,
+                "grade": grade(type_score),
+                "detail": f"{inconsistent_cols} column(s) storing numbers as text",
+            },
+            "Outlier Cleanliness": {
+                "score": outlier_score,
+                "max": 20,
+                "grade": grade(outlier_score),
+                "detail": f"{avg_outlier_frac*100:.1f}% of numeric values are extreme outliers",
+            },
+            "Validity": {
+                "score": validity_score,
+                "max": 20,
+                "grade": grade(validity_score),
+                "detail": f"{avg_invalid_frac*100:.1f}% of text values are placeholder or invalid strings",
+            },
+        },
+    }
