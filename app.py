@@ -6,6 +6,7 @@ apply_page_config()
 inject_css()
 
 from cache import get_dataframe_stats, load_file
+from guide import render as render_guide
 from state import init_state, maybe_reset_on_new_upload, render_sidebar, resolve_upload
 from tabs import (
     clean,
@@ -27,6 +28,7 @@ missing_threshold, numeric_strategy, conversion_threshold, mode = render_sidebar
     tab_validate,
     tab_profile,
     tab_history,
+    tab_guide,
 ) = st.tabs([
     "  Upload  ",
     "  Overview  ",
@@ -35,10 +37,14 @@ missing_threshold, numeric_strategy, conversion_threshold, mode = render_sidebar
     "  Validate  ",
     "  Profile  ",
     "  History & Export  ",
+    "  Guide  ",
 ])
 
 upload.render(tab_upload)
 uploaded = st.session_state.get("uploader")
+
+# guide tab is always available, file or no file
+render_guide(tab_guide)
 
 if uploaded is None:
     for tab in (tab_overview, tab_recommend, tab_clean, tab_validate, tab_profile, tab_history):

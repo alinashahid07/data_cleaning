@@ -6,6 +6,7 @@ from cache import get_dataframe_stats, load_file
 def render_sidebar():
     with st.sidebar:
         st.header("Settings")
+        st.divider()
         mode = st.radio(
             "Mode", ["Simple", "Advanced"], horizontal=True, key="mode_radio",
             help="Simple uses sensible defaults so you can start cleaning right away. Advanced lets you tune the thresholds manually."
@@ -59,7 +60,8 @@ def maybe_reset_on_new_upload(file_id):
         st.cache_data.clear()
         keys_to_clear = [
             k for k in st.session_state.keys()
-            if k not in ("uploader", "mode_radio", "sheet_selector")
+            if k not in ("uploader", "mode_radio", "sheet_selector",
+                         "tour_active", "tour_step", "tour_seen")
         ]
         for k in keys_to_clear:
             del st.session_state[k]
@@ -85,7 +87,11 @@ def init_state(df, load_key):
             "last_success_msg": None,
             "history": [],
             "state_key_id": state_key,
+            "file_just_loaded": True,
         })
+    else:
+        st.session_state["file_just_loaded"] = False
+
     if "val_selected" not in st.session_state:
         st.session_state.val_selected = {}
 
