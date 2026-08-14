@@ -14,6 +14,7 @@ from cleaning import (
     split_column,
     strip_whitespace,
 )
+from nl_cleaner import render_nl_cleaner
 from pipeline import commit_history, snapshot
 
 def _render_basic_cleaning(cdf):
@@ -419,9 +420,21 @@ def _render_type_guesser(cdf):
     if st.session_state.get("_omsg", ("",))[0] == "tg_apply":
         st.success(st.session_state.pop("_omsg")[1])
 
+def _render_ai_cleaner(cdf):
+    st.write("**AI Cleaner**")
+    st.caption(
+        "Describe what you want to do in plain English. Try to be as specific as possible.  "
+        "Gemini generates the code and shows it to you before running anything."
+    )
+    render_nl_cleaner(cdf)
+
 def render(tab, cdf, all_cols, missing_threshold, numeric_strategy, conversion_threshold):
     with tab:
         st.subheader("Manual Cleaning Operations")
+
+        with st.expander("AI Cleaner: describe what you want in plain English", expanded=False):
+            _render_ai_cleaner(cdf)
+        st.divider()
         _render_basic_cleaning(cdf)
         st.write("")
         _render_advanced_cleaning(cdf, missing_threshold, numeric_strategy, conversion_threshold)
@@ -435,5 +448,6 @@ def render(tab, cdf, all_cols, missing_threshold, numeric_strategy, conversion_t
         _render_merge_columns(cdf, all_cols)
         st.divider()
         _render_rename_columns(cdf, all_cols)
+
         st.divider()
         _render_type_guesser(cdf)

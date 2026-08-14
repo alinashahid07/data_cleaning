@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import numpy as np
 import streamlit as st
 from config import apply_page_config, inject_css
@@ -43,7 +46,6 @@ missing_threshold, numeric_strategy, conversion_threshold, mode = render_sidebar
 upload.render(tab_upload)
 uploaded = st.session_state.get("uploader")
 
-# guide tab is always available, file or no file
 render_guide(tab_guide)
 
 if uploaded is None:
