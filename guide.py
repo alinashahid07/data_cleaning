@@ -1,4 +1,5 @@
 import streamlit as st
+from ai_insights import get_ai_insights
 
 GUIDE_ITEMS = [
     {
@@ -112,11 +113,42 @@ def _init_guide():
     if "guide_checked" not in st.session_state:
         st.session_state.guide_checked = set()
 
-def render(tab):
+def _render_ai_fixes(cdf, file_id):
+    insights, err = get_ai_insights(cdf, file_id)
+    if err or not insights:
+        return
+
+    fixes = insights.get("fixes", [])
+    if not fixes:
+        return
+
+    st.markdown("### AI-Suggested Fixes")
+    st.caption("Based on what AI found in your data, ranked by priority.")
+
+    for fix in fixes:
+        issue = fix.get("issue", "")
+        column = fix.get("column", "")
+        reason = fix.get("reason", "")
+        tab_name = fix.get("tab", "")
+        action = fix.get("action", "")
+        shortcut = fix.get("shortcut", "")
+
+        with st.container():
+            st.markdown(f"**{issue}** ({column})")
+            st.caption(reason)
+            st.markdown(f"Go to the **{tab_name}** tab: {action}")
+            if shortcut:
+                st.caption(shortcut)
+            st.divider()
+
+def render(tab, cdf=None, file_id=None):
     _init_guide()
     checked = st.session_state.guide_checked
 
     with tab:
+        if cdf is not None and file_id is not None:
+            _render_ai_fixes(cdf, file_id)
+
         st.markdown("## Workflow Guide")
         st.caption(
             "Work through each step at your own pace. "

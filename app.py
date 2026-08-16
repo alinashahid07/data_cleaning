@@ -46,9 +46,8 @@ missing_threshold, numeric_strategy, conversion_threshold, mode = render_sidebar
 upload.render(tab_upload)
 uploaded = st.session_state.get("uploader")
 
-render_guide(tab_guide)
-
 if uploaded is None:
+    render_guide(tab_guide)
     for tab in (tab_overview, tab_recommend, tab_clean, tab_validate, tab_profile, tab_history):
         with tab:
             st.info("Upload a file in the Upload tab to get started.")
@@ -75,7 +74,10 @@ else:
             f"{stats['memory_usage']:.2f} MB"
         )
 
-        overview.render(tab_overview, cdf, stats, orig_stats)
+        render_guide(tab_guide, cdf=cdf, file_id=load_key)
+        # file_id passed so ai summary shows in overview too using cached result
+        overview.render(tab_overview, cdf, stats, orig_stats, file_id=load_key)
+
         recommendations.render(
             tab_recommend,
             cdf,

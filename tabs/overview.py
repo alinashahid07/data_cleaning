@@ -1,8 +1,13 @@
 import pandas as pd
 import streamlit as st
 
-def render(tab, cdf, stats, orig_stats):
+from ai_insights import render_summary
+
+def render(tab, cdf, stats, orig_stats, file_id=None):
     with tab:
+        if file_id:
+            render_summary(cdf, file_id)
+            st.divider()
         st.subheader("Data Statistics")
         c1, c2, c3 = st.columns(3)
         with c1:
