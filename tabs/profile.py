@@ -279,10 +279,12 @@ def render(tab, cdf, mode="Simple"):
     with tab:
         show_msg()
 
+        df_key = st.session_state.get("current_df_key", "")
+
         # column profiler
         st.subheader("Column Profiler")
         st.caption("Per-column stats including min, max, mean, median, std, skewness, and sample values.")
-        profile = get_column_profile(cdf)
+        profile = get_column_profile(df_key, cdf)
         st.dataframe(profile, use_container_width=True, hide_index=True)
         worst = profile[profile["Null"] > 0].sort_values("Null", ascending=False)
         if not worst.empty:
@@ -306,11 +308,11 @@ def render(tab, cdf, mode="Simple"):
         dist_col = st.selectbox("Column to plot", all_cols, key="dist_col")
         if dist_col in num_cols:
             n_bins = st.slider("Number of bins", 5, 100, 30, key="hist_bins")
-            hist_data = get_histogram_data(cdf[dist_col], n_bins=n_bins)
+            hist_data = get_histogram_data(df_key, cdf[dist_col], n_bins=n_bins)
             _render_histogram(dist_col, hist_data)
         elif dist_col in cat_cols:
             top_n = st.slider("Max categories to show", 5, 50, 20, key="bar_topn")
-            bar_data = get_bar_data(cdf[dist_col], top_n=top_n)
+            bar_data = get_bar_data(df_key, cdf[dist_col], top_n=top_n)
             _render_bar_chart(dist_col, bar_data)
         else:
             st.caption(f"Column type {cdf[dist_col].dtype} is not supported for distribution plots.")
@@ -323,7 +325,7 @@ def render(tab, cdf, mode="Simple"):
             "Each row is a data row and each column strip is a dataset column. "
             "Red cells are missing values. Only columns with at least one missing value are shown."
         )
-        heatmap_data = get_missing_heatmap_data(cdf)
+        heatmap_data = get_missing_heatmap_data(df_key, cdf)
         _render_missing_heatmap(heatmap_data)
 
         st.divider()
@@ -353,7 +355,7 @@ def render(tab, cdf, mode="Simple"):
                         "Kendall is also rank based and more robust on small datasets."
                     ),
                 )
-                corr_data = get_correlation_data(cdf, method=corr_method)
+                corr_data = get_correlation_data(df_key, cdf, method=corr_method)
                 _render_correlation_heatmap(corr_data)
 
         st.divider()

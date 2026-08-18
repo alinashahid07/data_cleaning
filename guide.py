@@ -1,5 +1,4 @@
 import streamlit as st
-from ai_insights import get_ai_insights
 
 GUIDE_ITEMS = [
     {
@@ -113,17 +112,28 @@ def _init_guide():
     if "guide_checked" not in st.session_state:
         st.session_state.guide_checked = set()
 
-def _render_ai_fixes(cdf, file_id):
-    insights, err = get_ai_insights(cdf, file_id)
-    if err or not insights:
+def _render_ai_section(cdf, file_id):
+    st.markdown("## AI Analysis")
+    st.caption("AI has read your specific data and tells you exactly what to fix and how.")
+
+    # never trigger the api call here, app.py handles that after all tabs render
+    cache_key = f"ai_insights_{file_id}"
+    insights = st.session_state.get(cache_key)
+
+    if not insights:
+        st.caption("AI analysis loading...")
         return
+
+    summary = insights.get("summary", "")
+    if summary:
+        st.info(summary)
 
     fixes = insights.get("fixes", [])
     if not fixes:
         return
 
-    st.markdown("### AI-Suggested Fixes")
-    st.caption("Based on what AI found in your data, ranked by priority.")
+    st.markdown("### Suggested Fixes")
+    st.caption("Ranked by priority.")
 
     for fix in fixes:
         issue = fix.get("issue", "")
@@ -141,26 +151,21 @@ def _render_ai_fixes(cdf, file_id):
                 st.caption(shortcut)
             st.divider()
 
-def render(tab, cdf=None, file_id=None):
-    _init_guide()
+def _render_general_guide():
     checked = st.session_state.guide_checked
 
-    with tab:
-        if cdf is not None and file_id is not None:
-            _render_ai_fixes(cdf, file_id)
+    st.markdown("## Workflow Guide")
+    st.caption(
+        "Work through each step at your own pace. "
+        "Tick items off as you go. You can come back here any time."
+    )
 
-        st.markdown("## Workflow Guide")
-        st.caption(
-            "Work through each step at your own pace. "
-            "Tick items off as you go. You can come back here any time."
-        )
+    done = len(checked)
+    total = len(GUIDE_ITEMS)
+    pct = int(done / total * 100)
 
-        done = len(checked)
-        total = len(GUIDE_ITEMS)
-        pct = int(done / total * 100)
-
-        # progress bar
-        st.markdown(f"""
+    # progress bar
+    st.markdown(f"""
 <div style="margin:16px 0 24px 0;">
   <div style="display:flex;justify-content:space-between;
               font-size:0.75rem;color:#888;margin-bottom:6px;">
@@ -174,55 +179,65 @@ def render(tab, cdf=None, file_id=None):
 </div>
 """, unsafe_allow_html=True)
 
+    st.divider()
+
+    for i, item in enumerate(GUIDE_ITEMS):
+        key = f"guide_check_{i}"
+        is_checked = i in checked
+        col_check, col_content = st.columns([0.06, 0.94])
+
+        with col_check:
+            ticked = st.checkbox(
+                label="",
+                value=is_checked,
+                key=key,
+                label_visibility="collapsed",
+            )
+            if ticked and i not in checked:
+                checked.add(i)
+                st.session_state.guide_checked = checked
+                st.rerun()
+            elif not ticked and i in checked:
+                checked.discard(i)
+                st.session_state.guide_checked = checked
+                st.rerun()
+
+        with col_content:
+            title_style = (
+                "text-decoration:line-through;color:#555;"
+                if is_checked else "color:#fff;"
+            )
+            tab_badge = (
+                f'<span style="font-size:0.65rem;font-weight:700;'
+                f'color:#1f77b4;text-transform:uppercase;'
+                f'letter-spacing:1px;margin-left:8px;">'
+                f'{item["tab"]} tab</span>'
+            )
+            st.markdown(
+                f'<p style="margin:0 0 4px 0;font-size:0.95rem;'
+                f'font-weight:700;{title_style}">'
+                f'{item["title"]}{tab_badge}</p>',
+                unsafe_allow_html=True,
+            )
+            st.caption(item["desc"])
+            with st.expander("Tips"):
+                for tip in item["tips"]:
+                    st.markdown(f"- {tip}")
+
         st.divider()
 
-        for i, item in enumerate(GUIDE_ITEMS):
-            key = f"guide_check_{i}"
-            is_checked = i in checked
-            col_check, col_content = st.columns([0.06, 0.94])
+    # reset button at the bottom
+    if checked:
+        if st.button("Reset all checkboxes", key="guide_reset"):
+            st.session_state.guide_checked = set()
+            st.rerun()
 
-            with col_check:
-                ticked = st.checkbox(
-                    label="",
-                    value=is_checked,
-                    key=key,
-                    label_visibility="collapsed",
-                )
-                if ticked and i not in checked:
-                    checked.add(i)
-                    st.session_state.guide_checked = checked
-                    st.rerun()
-                elif not ticked and i in checked:
-                    checked.discard(i)
-                    st.session_state.guide_checked = checked
-                    st.rerun()
+def render(tab, cdf=None, file_id=None):
+    _init_guide()
 
-            with col_content:
-                title_style = (
-                    "text-decoration:line-through;color:#555;"
-                    if is_checked else "color:#fff;"
-                )
-                tab_badge = (
-                    f'<span style="font-size:0.65rem;font-weight:700;'
-                    f'color:#1f77b4;text-transform:uppercase;'
-                    f'letter-spacing:1px;margin-left:8px;">'
-                    f'{item["tab"]} tab</span>'
-                )
-                st.markdown(
-                    f'<p style="margin:0 0 4px 0;font-size:0.95rem;'
-                    f'font-weight:700;{title_style}">'
-                    f'{item["title"]}{tab_badge}</p>',
-                    unsafe_allow_html=True,
-                )
-                st.caption(item["desc"])
-                with st.expander("Tips"):
-                    for tip in item["tips"]:
-                        st.markdown(f"- {tip}")
-
+    with tab:
+        if cdf is not None and file_id is not None:
+            _render_ai_section(cdf, file_id)
             st.divider()
 
-        # reset button at the bottom
-        if checked:
-            if st.button("Reset all checkboxes", key="guide_reset"):
-                st.session_state.guide_checked = set()
-                st.rerun()
+        _render_general_guide()

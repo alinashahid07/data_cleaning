@@ -3,7 +3,7 @@ import streamlit as st
 
 from ai_insights import render_summary
 
-def render(tab, cdf, stats, orig_stats, file_id=None):
+def render(tab, cdf, stats, orig_stats, file_id=None, df_key=""):
     with tab:
         if file_id:
             render_summary(cdf, file_id)

@@ -8,7 +8,7 @@ from config import apply_page_config, inject_css
 apply_page_config()
 inject_css()
 
-from cache import get_dataframe_stats, load_file
+from cache import get_dataframe_stats, load_file, make_df_key
 from guide import render as render_guide
 from state import init_state, maybe_reset_on_new_upload, render_sidebar, resolve_upload
 from tabs import (
@@ -59,11 +59,13 @@ else:
         uploaded.seek(0)
         file_bytes, selected_sheet = resolve_upload(uploaded)
         load_key = f"{file_id}_{selected_sheet}"
-        df = load_file(file_bytes, uploaded.name, load_key, sheet_name=selected_sheet)
-        init_state(df, load_key)
+        with st.spinner("Loading your file..."):
+            df = load_file(file_bytes, uploaded.name, load_key, sheet_name=selected_sheet)
+            init_state(df, load_key)
 
         cdf = st.session_state.current_df
-        stats = get_dataframe_stats(cdf)
+        df_key = st.session_state.get("current_df_key", make_df_key(cdf))
+        stats = get_dataframe_stats(df_key, cdf)
         orig_stats = st.session_state.original_stats
         all_cols = list(cdf.columns)
         text_cols = list(cdf.select_dtypes(include="object").columns)
@@ -75,12 +77,13 @@ else:
         )
 
         render_guide(tab_guide, cdf=cdf, file_id=load_key)
-        # file_id passed so ai summary shows in overview too using cached result
-        overview.render(tab_overview, cdf, stats, orig_stats, file_id=load_key)
+
+        overview.render(tab_overview, cdf, stats, orig_stats, file_id=load_key, df_key=df_key)
 
         recommendations.render(
             tab_recommend,
             cdf,
+            df_key=df_key,
             conversion_threshold=conversion_threshold,
             missing_threshold=missing_threshold,
             numeric_strategy=numeric_strategy,
@@ -89,6 +92,7 @@ else:
             tab_clean,
             cdf,
             all_cols,
+            df_key=df_key,
             missing_threshold=missing_threshold,
             numeric_strategy=numeric_strategy,
             conversion_threshold=conversion_threshold,
@@ -103,6 +107,16 @@ else:
             "filename": uploaded.name,
         }
         history_export.render(tab_history, cdf, pipeline_settings)
+
+        # this means the page is fully visible before gemini is called
+        # on first load this triggers a rerun once insights are ready
+        # on subsequent reruns the cache hit is instant and nothing blocks
+        ai_cache_key = f"ai_insights_{load_key}"
+        if ai_cache_key not in st.session_state:
+            from ai_insights import get_ai_insights
+            with st.spinner("AI is reading your data..."):
+                get_ai_insights(cdf, load_key)
+            st.rerun()
 
     except Exception as e:
         st.error(f"Error reading the file: {e}")

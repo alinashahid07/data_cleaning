@@ -142,7 +142,9 @@ def _call_gemini(df):
     except Exception:
         return None, "Gemini returned an unexpected format."
 
-# cache insights per file so we do not call gemini on every rerun
+# fetches ai insights for the given dataframe
+# caches result in session state so subsequent calls are instant
+# always triggers the gemini call if not cached
 def get_ai_insights(df, file_id):
     cache_key = f"ai_insights_{file_id}"
     if cache_key in st.session_state:
@@ -155,19 +157,16 @@ def get_ai_insights(df, file_id):
     st.session_state[cache_key] = result
     return result, None
 
+# renders the ai summary in the overview tab
+# never triggers the api call, only reads from cache
+# the actual api call is made in app.py after all tabs render
 def render_summary(df, file_id):
-    api_key = _get_api_key()
-    if not api_key:
-        return
+    cache_key = f"ai_insights_{file_id}"
+    insights = st.session_state.get(cache_key)
 
-    already_cached = f"ai_insights_{file_id}" in st.session_state
-    if not already_cached:
-        with st.spinner("AI is reading your data..."):
-            insights, err = get_ai_insights(df, file_id)
-    else:
-        insights, err = get_ai_insights(df, file_id)
-
-    if err or not insights:
+    if not insights:
+        # still loading, show a subtle placeholder, not a spinner
+        st.caption("AI summary loading...")
         return
 
     summary = insights.get("summary", "")

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import numpy as np
 import pandas as pd
@@ -12,9 +13,15 @@ def load_file(file_bytes, filename, file_id, sheet_name=None):
         return pd.read_csv(buf, quotechar='"', skipinitialspace=True)
     return pd.read_excel(buf, sheet_name=sheet_name)
 
+# builds a cheap key from shape and a small sample, avoids hashing the whole dataframe on every cache check
+def make_df_key(df):
+    sample = df.head(20).to_string() + str(df.shape) + str(df.dtypes.tolist())
+    return hashlib.md5(sample.encode()).hexdigest()
+
 # get stats summary
 @st.cache_data(show_spinner=False)
-def get_dataframe_stats(df):
+def get_dataframe_stats(df_key, _df):
+    df = _df
     return {
         "rows": df.shape[0],
         "columns": df.shape[1],
@@ -27,7 +34,8 @@ def get_dataframe_stats(df):
 
 # per column stats for profiler
 @st.cache_data(show_spinner=False)
-def get_column_profile(df):
+def get_column_profile(df_key, _df):
+    df = _df
     rows = []
     for col in df.columns:
         s = df[col]
@@ -63,7 +71,8 @@ def get_column_profile(df):
 
 # analyze plus recommend, cached together
 @st.cache_data(show_spinner=False)
-def get_analysis_and_recommendations(df, conversion_threshold):
+def get_analysis_and_recommendations(df_key, _df, conversion_threshold):
+    df = _df
     issues = {
         "duplicate_rows": int(df.duplicated().sum()),
         "duplicate_cols": max(
@@ -129,7 +138,7 @@ def get_analysis_and_recommendations(df, conversion_threshold):
 
 # histogram plus kde data for a numeric column
 @st.cache_data(show_spinner=False)
-def get_histogram_data(series, n_bins=30):
+def get_histogram_data(df_key, series, n_bins=30):
     clean = series.dropna()
     if clean.empty:
         return {}
@@ -164,7 +173,7 @@ def get_histogram_data(series, n_bins=30):
 
 # value counts for a categorical column
 @st.cache_data(show_spinner=False)
-def get_bar_data(series, top_n=20):
+def get_bar_data(df_key, series, top_n=20):
     clean = series.dropna()
     if clean.empty:
         return {}
@@ -181,7 +190,8 @@ def get_bar_data(series, top_n=20):
 
 # row sampled null matrix, capped so the chart stays readable
 @st.cache_data(show_spinner=False)
-def get_missing_heatmap_data(df):
+def get_missing_heatmap_data(df_key, _df):
+    df = _df
     max_rows = 300
     sample = df.sample(max_rows, random_state=0) if len(df) > max_rows else df
     cols_with_nulls = [c for c in sample.columns if sample[c].isna().any()]
@@ -198,7 +208,8 @@ def get_missing_heatmap_data(df):
 
 # correlation matrix for all numeric columns, melted into long form
 @st.cache_data(show_spinner=False)
-def get_correlation_data(df, method="pearson"):
+def get_correlation_data(df_key, _df, method="pearson"):
+    df = _df
     num_cols = df.select_dtypes(include="number").columns.tolist()
     if len(num_cols) < 2:
         return {}
@@ -221,8 +232,9 @@ def get_correlation_data(df, method="pearson"):
 
 # scans every column and suggests a better type with a confidence score
 @st.cache_data(show_spinner=False)
-def get_type_suggestions(df):
+def get_type_suggestions(df_key, _df):
     """Only columns where the current type is wrong or suboptimal get a suggestion."""
+    df = _df
     email_pattern = r"^[\w\.\+\-]+@[\w\-]+\.[a-zA-Z]{2,}$"
     currency_pattern = r'[$€£¥₹₽₺₩฿]|(USD|EUR|GBP|JPY|CNY|INR|PKR|Rs\.?)'
     bool_values = {"true", "false", "yes", "no", "1", "0", "y", "n"}
@@ -393,9 +405,10 @@ def get_type_suggestions(df):
 
 # scores data quality from 0 to 100 across five weighted dimensions
 @st.cache_data(show_spinner=False)
-def get_quality_score(df):
-    """Each dimension contributes 20 points. Cache busts whenever the dataframe changes,
-    so the score updates live as the user cleans."""
+def get_quality_score(df_key, _df):
+    """Each dimension contributes 20 points. Cache is keyed on df_key so the score
+    still updates live as the user cleans, without hashing the full dataframe."""
+    df = _df
     total_cells = df.shape[0] * df.shape[1]
     if total_cells == 0:
         return {"total": 0, "breakdown": {}}

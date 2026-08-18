@@ -1,6 +1,6 @@
 import io
 import streamlit as st
-from cache import get_dataframe_stats, load_file
+from cache import get_dataframe_stats, load_file, make_df_key
 
 # sidebar settings
 def render_sidebar():
@@ -9,7 +9,7 @@ def render_sidebar():
         st.divider()
         mode = st.radio(
             "Mode", ["Simple", "Advanced"], horizontal=True, key="mode_radio",
-            help="Simple uses sensible defaults so you can start cleaning right away. Advanced lets you tune the thresholds manually."
+            help="Simple uses sensible defaults. Switch to Advanced to unlock extra features.",
         )
         if mode == "Simple":
             st.caption("Using default settings. Switch to Advanced to unlock extra features.")
@@ -57,7 +57,8 @@ def resolve_upload(uploaded):
 # wipe state on a genuinely new upload
 def maybe_reset_on_new_upload(file_id):
     if st.session_state.get("loaded_file_id") != file_id:
-        st.cache_data.clear()
+        # only clear session state, don't nuke all cache
+        # cache entries miss naturally on the new df_key
         keys_to_clear = [
             k for k in st.session_state.keys()
             if k not in ("uploader", "mode_radio", "sheet_selector",
@@ -78,10 +79,13 @@ def init_state(df, load_key):
         stale = [k for k in st.session_state.keys() if k.startswith(("_vc_", "_va_", "_rc_", "_ra_"))]
         for k in stale:
             del st.session_state[k]
+        df_key = make_df_key(df)
         st.session_state.update({
             "original_df": df.copy(),
             "current_df": df.copy(),
-            "original_stats": get_dataframe_stats(df),
+            "original_df_key": df_key,
+            "current_df_key": df_key,
+            "original_stats": get_dataframe_stats(df_key, df),
             "selected_columns": {},
             "val_selected": {},
             "last_success_msg": None,
@@ -91,6 +95,9 @@ def init_state(df, load_key):
         })
     else:
         st.session_state["file_just_loaded"] = False
+        # keep current_df_key in sync whenever df changes after a clean op
+        # make_df_key only hashes a tiny sample so this is cheap
+        st.session_state["current_df_key"] = make_df_key(st.session_state.current_df)
 
     if "val_selected" not in st.session_state:
         st.session_state.val_selected = {}
