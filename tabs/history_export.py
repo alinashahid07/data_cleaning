@@ -14,6 +14,13 @@ def _render_reset():
     st.subheader("Reset Data")
     st.warning("This will discard all cleaning and restore the original uploaded file.")
     if st.button("Reset to Original Data", key="reset_orig", use_container_width=True):
+        persist_key = st.session_state.get("_persist_key")
+        if persist_key:
+            try:
+                from session_persist import delete_session
+                delete_session(persist_key)
+            except Exception:
+                pass
         st.session_state.current_df = st.session_state.original_df.copy()
         st.session_state.selected_columns = {}
         st.session_state.history = []
@@ -76,6 +83,13 @@ def _render_history(hist):
         if st.button("Clear History", key="clear_hist", use_container_width=True):
             st.session_state.history = []
             st.session_state.last_success_msg = "History cleared."
+            persist_key = st.session_state.get("_persist_key")
+            if persist_key:
+                try:
+                    from session_persist import delete_session
+                    delete_session(persist_key)
+                except Exception:
+                    pass
             st.rerun()
 
 def _render_pipeline_json(hist, settings):
@@ -204,7 +218,7 @@ def _render_report_pdf(cdf, hist, filename):
             use_container_width=True,
         )
 
-def render(tab, cdf, settings):
+def render(tab, cdf, settings, df_key=""):
     filename = settings.get("filename", "dataset")
     with tab:
         _render_reset()

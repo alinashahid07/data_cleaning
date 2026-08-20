@@ -72,35 +72,129 @@ def maybe_reset_on_new_upload(file_id):
         st.rerun()
 
 # set up session state for the loaded dataframe
-def init_state(df, load_key):
+def init_state(df, load_key, file_bytes: bytes = b"", filename: str = ""):
+    """
+    Initialises session state for a loaded file.
+    stable_key is built from filename plus file size so it survives page reloads.
+    Streamlit file_id changes on every reload so it is only used for the in-memory
+    load_key, never for the on-disk session key.
+
+    Flow:
+    1. If this load_key is already initialised just sync df_key and return.
+    2. If a persisted session exists on disk and user has not yet been asked
+       show the resume dialog and halt further init until they choose.
+    3. If user chose continue restore from disk.
+    4. If user chose fresh or no saved session exists init from scratch.
+    """
+    from session_persist import (
+        cleanup_old_sessions,
+        delete_session,
+        load_session,
+        make_stable_file_key,
+        session_exists,
+    )
+
     state_key = f"state_{load_key}"
-    if st.session_state.get("state_key_id") != state_key:
-        # clear stale checkbox widget keys from the previous sheet, avoids ghost selections
-        stale = [k for k in st.session_state.keys() if k.startswith(("_vc_", "_va_", "_rc_", "_ra_"))]
-        for k in stale:
-            del st.session_state[k]
-        df_key = make_df_key(df)
-        st.session_state.update({
-            "original_df": df.copy(),
-            "current_df": df.copy(),
-            "original_df_key": df_key,
-            "current_df_key": df_key,
-            "original_stats": get_dataframe_stats(df_key, df),
-            "selected_columns": {},
-            "val_selected": {},
-            "last_success_msg": None,
-            "history": [],
-            "state_key_id": state_key,
-            "file_just_loaded": True,
-        })
-    else:
+    stable_key = make_stable_file_key(filename, file_bytes) if filename else load_key
+
+    if st.session_state.get("state_key_id") == state_key:
         st.session_state["file_just_loaded"] = False
         # keep current_df_key in sync whenever df changes after a clean op
         # make_df_key only hashes a tiny sample so this is cheap
         st.session_state["current_df_key"] = make_df_key(st.session_state.current_df)
+        return
+
+    cleanup_old_sessions()
+
+    # clear stale checkbox widget keys from the previous sheet, avoids ghost selections
+    stale = [k for k in st.session_state.keys() if k.startswith(("_vc_", "_va_", "_rc_", "_ra_"))]
+    for k in stale:
+        del st.session_state[k]
+
+    resume_choice = st.session_state.get("_resume_choice")
+    resume_stable_key = st.session_state.get("_resume_stable_key")
+
+    if resume_choice is None and session_exists(stable_key):
+        saved = load_session(stable_key)
+        if saved:
+            _show_resume_dialog(stable_key, saved)
+            st.stop()
+
+    if resume_choice == "continue" and resume_stable_key == stable_key:
+        saved = load_session(stable_key)
+        if saved:
+            st.session_state.pop("_resume_choice", None)
+            st.session_state.pop("_resume_stable_key", None)
+            orig_df = saved["original_df"]
+            curr_df = saved["current_df"]
+            df_key = make_df_key(curr_df)
+            orig_key = make_df_key(orig_df)
+            st.session_state.update({
+                "original_df": orig_df,
+                "current_df": curr_df,
+                "original_df_key": orig_key,
+                "current_df_key": df_key,
+                "original_stats": get_dataframe_stats(orig_key, orig_df),
+                "selected_columns": {},
+                "val_selected": {},
+                "last_success_msg": None,
+                "history": saved.get("history", []),
+                "history_len": saved.get("history_len", 0),
+                "state_key_id": state_key,
+                "file_just_loaded": True,
+                "_persist_key": stable_key,
+            })
+            if "val_selected" not in st.session_state:
+                st.session_state.val_selected = {}
+            return
+
+    if resume_choice == "fresh" and resume_stable_key == stable_key:
+        delete_session(stable_key)
+        st.session_state.pop("_resume_choice", None)
+        st.session_state.pop("_resume_stable_key", None)
+
+    df_key = make_df_key(df)
+    st.session_state.update({
+        "original_df": df.copy(),
+        "current_df": df.copy(),
+        "original_df_key": df_key,
+        "current_df_key": df_key,
+        "original_stats": get_dataframe_stats(df_key, df),
+        "selected_columns": {},
+        "val_selected": {},
+        "last_success_msg": None,
+        "history": [],
+        "history_len": 0,
+        "state_key_id": state_key,
+        "file_just_loaded": True,
+        "_persist_key": stable_key,
+    })
 
     if "val_selected" not in st.session_state:
         st.session_state.val_selected = {}
+
+# dialog shown when a saved session is found for the uploaded file
+# user picks continue or start fresh, the choice is written to session
+# state and the dialog closes via st.rerun so normal init can proceed
+@st.dialog("Resume your previous session?")
+def _show_resume_dialog(stable_key: str, saved_info: dict):
+    from session_persist import format_saved_time
+    saved_ago = format_saved_time(saved_info["saved_at"])
+    n_steps = len(saved_info.get("history", []))
+    st.write(f"A saved session was found for this file from **{saved_ago}**.")
+    st.write(f"It has **{n_steps} cleaning step{'s' if n_steps != 1 else ''}** recorded.")
+    st.write("Do you want to continue where you left off, or start fresh?")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Continue where I left off", type="primary", use_container_width=True):
+            st.session_state["_resume_choice"] = "continue"
+            st.session_state["_resume_stable_key"] = stable_key
+            st.rerun()
+    with col2:
+        if st.button("Start fresh", use_container_width=True):
+            st.session_state["_resume_choice"] = "fresh"
+            st.session_state["_resume_stable_key"] = stable_key
+            st.rerun()
 
 # show and immediately clear any pending success message
 def show_msg():

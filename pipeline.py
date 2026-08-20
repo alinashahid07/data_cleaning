@@ -6,6 +6,29 @@ def snapshot():
     """Takes a snapshot of current_df. Pass the result to commit_history() once the operation succeeds."""
     return st.session_state.current_df.copy()
 
+# saves the current session to disk after every mutating operation
+# runs only when a persist key is set, which happens after init_state
+# the save is called after the mutation is committed to session state
+# so the file on disk always reflects the latest state
+def _autosave():
+    persist_key = st.session_state.get("_persist_key")
+    st.write(f"[autosave] persist_key: {persist_key}")
+    if not persist_key:
+        st.write("[autosave] no persist key, skipping")
+        return
+    try:
+        from session_persist import save_session
+        st.write("[autosave] calling save_session")
+        save_session(
+            stable_key=persist_key,
+            current_df=st.session_state.current_df,
+            history=st.session_state.get("history", []),
+            original_df=st.session_state.get("original_df", st.session_state.current_df),
+        )
+        st.write("[autosave] save_session returned")
+    except Exception as e:
+        st.write(f"[autosave] exception: {e}")
+
 # commit a snapshot after success
 def commit_history(label, snap):
     """Commits a previously taken snapshot to history. Only call this after the operation succeeds."""
@@ -15,6 +38,7 @@ def commit_history(label, snap):
         st.session_state.history.pop(0)
     st.session_state.history.append({"label": label, "df": snap})
     st.session_state["history_len"] = st.session_state.get("history_len", 0) + 1
+    _autosave()
 
 # restore previous state
 def undo_last():
@@ -22,6 +46,7 @@ def undo_last():
         last = st.session_state.history.pop()
         st.session_state.current_df = last["df"]
         st.session_state["history_len"] = st.session_state.get("history_len", 0) + 1
+        _autosave()
         return last["label"]
     return None
 

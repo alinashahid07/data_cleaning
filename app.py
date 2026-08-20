@@ -39,7 +39,7 @@ missing_threshold, numeric_strategy, conversion_threshold, mode = render_sidebar
     "  Clean  ",
     "  Validate  ",
     "  Profile  ",
-    "  History & Export  ",
+    "  History and Export  ",
     "  Guide  ",
 ])
 
@@ -61,7 +61,16 @@ else:
         load_key = f"{file_id}_{selected_sheet}"
         with st.spinner("Loading your file..."):
             df = load_file(file_bytes, uploaded.name, load_key, sheet_name=selected_sheet)
-            init_state(df, load_key)
+            # file_bytes and filename are passed so init_state can build a stable
+            # session key from filename plus size instead of file_id which changes on reload
+            init_state(df, load_key, file_bytes=file_bytes, filename=uploaded.name)
+            st.write("persist key in state:", st.session_state.get("_persist_key"))
+
+        # init_state calls st.stop() while the resume dialog is open
+        # so current_df will not exist yet in that render pass
+        # everything below is skipped until the user makes a choice and st.rerun fires
+        if "current_df" not in st.session_state:
+            st.stop()
 
         cdf = st.session_state.current_df
         df_key = st.session_state.get("current_df_key", make_df_key(cdf))
