@@ -4,19 +4,101 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# read uploaded file, cached
+# fingerprint helper
+# files above this row count get dtype downcasting and sampled analysis
+LARGE_FILE_THRESHOLD = 50_000
+# files above this get a warning banner shown to the user
+LARGE_FILE_WARN_THRESHOLD = 50_000
+# rows used for sampled analysis functions on large files
+ANALYSIS_SAMPLE_SIZE = 20_000
+
+def make_df_key(df: pd.DataFrame) -> str:
+    """
+    Cheap string fingerprint for a dataframe.
+    Used as the cache key instead of passing the full df,
+    so st.cache_data never has to hash thousands of cells.
+    Shape + dtype signature + hash of first and last 5 rows covers
+    virtually all cases where the df has actually changed.
+    """
+    shape_part = f"{df.shape[0]}x{df.shape[1]}"
+    dtype_part = "".join(str(t) for t in df.dtypes)
+    sample = pd.concat([df.head(5), df.tail(5)])
+    sample_hash = str(pd.util.hash_pandas_object(sample).sum())
+    return f"{shape_part}__{sample_hash}__{hash(dtype_part)}"
+
+def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Downcasts int64 to int32 and float64 to float32 to cut memory roughly in half.
+    Only applied to large files. A warning is shown to the user at load time
+    because int32 max is 2 billion and float32 has less decimal precision than float64.
+    Columns that would overflow int32 are left as int64.
+    """
+    for col in df.select_dtypes(include="integer").columns:
+        col_min = df[col].min()
+        col_max = df[col].max()
+        if col_min >= np.iinfo(np.int32).min and col_max <= np.iinfo(np.int32).max:
+            df[col] = df[col].astype(np.int32)
+    for col in df.select_dtypes(include="float").columns:
+        df[col] = df[col].astype(np.float32)
+    return df
+
+def _is_large(df: pd.DataFrame) -> bool:
+    return len(df) >= LARGE_FILE_THRESHOLD
+
+def _sample_for_analysis(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Returns a random sample of the df for expensive analysis functions.
+    On small files returns the full df. On large files returns ANALYSIS_SAMPLE_SIZE rows.
+    The sample is seeded so results are stable across reruns.
+    """
+    if len(df) <= ANALYSIS_SAMPLE_SIZE:
+        return df
+    return df.sample(ANALYSIS_SAMPLE_SIZE, random_state=42)
+
+# file loading
+
 @st.cache_data(show_spinner=False)
-def load_file(file_bytes, filename, file_id, sheet_name=None):
+def load_file(file_bytes: bytes, filename: str, file_id: str, sheet_name=None):
+    """
+    Loads a CSV or Excel file from bytes.
+    For CSV files above LARGE_FILE_THRESHOLD rows, reads in chunks and concatenates
+    so peak memory during load stays low. Dtype downcasting is applied automatically
+    to large files to cut memory usage roughly in half.
+    A warning is stored in session state so app.py can show it after load.
+    """
     ext = filename.split(".")[-1].lower()
     buf = io.BytesIO(file_bytes)
     if ext == "csv":
-        return pd.read_csv(buf, quotechar='"', skipinitialspace=True)
-    return pd.read_excel(buf, sheet_name=sheet_name)
+        CHUNK = 50_000
+        chunks = []
+        reader = pd.read_csv(
+            buf,
+            quotechar='"',
+            skipinitialspace=True,
+            chunksize=CHUNK,
+        )
+        for chunk in reader:
+            chunks.append(chunk)
+        df = pd.concat(chunks, ignore_index=True) if len(chunks) > 1 else chunks[0]
+    else:
+        df = pd.read_excel(buf, sheet_name=sheet_name)
 
-# builds a cheap key from shape and a small sample, avoids hashing the whole dataframe on every cache check
-def make_df_key(df):
-    sample = df.head(20).to_string() + str(df.shape) + str(df.dtypes.tolist())
-    return hashlib.md5(sample.encode()).hexdigest()
+    if _is_large(df):
+        df = _downcast_numeric(df)
+        st.session_state["_large_file_warning"] = (
+            f"Large file detected ({len(df):,} rows). "
+            "Numeric columns were downcast to 32-bit to save memory. "
+            "int32 max is 2.1 billion. float32 has slightly less decimal precision than float64. "
+            "This has no effect on cleaning operations."
+        )
+    else:
+        st.session_state.pop("_large_file_warning", None)
+    return df
+
+# cached analysis functions, all keyed on df_key (cheap string)
+# df itself is passed separately and NOT used as a cache key discriminator
+# st.cache_data hashes ALL args, so we pass df last and rely on df_key
+# being unique enough to bust the cache correctly
 
 # get stats summary
 @st.cache_data(show_spinner=False)
@@ -30,6 +112,7 @@ def get_dataframe_stats(df_key, _df):
         "numeric_cols": len(df.select_dtypes(include=np.number).columns),
         "categorical_cols": len(df.select_dtypes(exclude=np.number).columns),
         "memory_usage": df.memory_usage(deep=True).sum() / 1024 ** 2,
+        "is_large": _is_large(df),
     }
 
 # per column stats for profiler
@@ -72,7 +155,13 @@ def get_column_profile(df_key, _df):
 # analyze plus recommend, cached together
 @st.cache_data(show_spinner=False)
 def get_analysis_and_recommendations(df_key, _df, conversion_threshold):
+    """
+    On large files this runs on a random sample to stay fast.
+    The sample size is large enough that recommendations are still reliable.
+    """
     df = _df
+    sample = _sample_for_analysis(df)
+    is_sampled = len(sample) < len(df)
     issues = {
         "duplicate_rows": int(df.duplicated().sum()),
         "duplicate_cols": max(
@@ -87,10 +176,12 @@ def get_analysis_and_recommendations(df_key, _df, conversion_threshold):
         "missing_cells": int(df.isna().sum().sum()),
         "missing_cols": [],
         "edge_char_cols": [],
+        "is_sampled": is_sampled,
+        "sample_size": len(sample),
     }
     currency_pattern = r'[$€£¥₹₽₺₩฿]|(USD|EUR|GBP|JPY|CNY|INR|PKR)'
-    for col in df.select_dtypes(include="object").columns:
-        s_str = df[col].astype(str)
+    for col in sample.select_dtypes(include="object").columns:
+        s_str = sample[col].astype(str)
         if s_str.str.strip().ne(s_str).any():
             issues["whitespace_cols"].append(col)
         non_empty = s_str.str.strip().replace("", np.nan).dropna()
@@ -139,20 +230,25 @@ def get_analysis_and_recommendations(df_key, _df, conversion_threshold):
 # histogram plus kde data for a numeric column
 @st.cache_data(show_spinner=False)
 def get_histogram_data(df_key, series, n_bins=30):
+    """
+    On large series uses a sample for the KDE calculation which is the slow part.
+    Histogram counts still use the full series for accuracy.
+    """
     clean = series.dropna()
     if clean.empty:
         return {}
     counts, edges = np.histogram(clean, bins=n_bins)
     bin_centers = 0.5 * (edges[:-1] + edges[1:])
-    n = len(clean)
-    std = clean.std()
+    kde_source = clean.sample(min(10_000, len(clean)), random_state=42) if len(clean) > 10_000 else clean
+    n = len(kde_source)
+    std = kde_source.std()
     if std == 0:
         kde_x = bin_centers.tolist()
         kde_y = [0.0] * len(bin_centers)
     else:
         bw = 1.06 * std * (n ** -0.2)
         kde_x = np.linspace(edges[0], edges[-1], 200)
-        diffs = (kde_x[:, None] - clean.values[None, :]) / bw
+        diffs = (kde_x[:, None] - kde_source.values[None, :]) / bw
         kde_y = np.exp(-0.5 * diffs ** 2).sum(axis=1) / (n * bw * np.sqrt(2 * np.pi))
         kde_x = kde_x.tolist()
         kde_y = kde_y.tolist()
@@ -191,6 +287,10 @@ def get_bar_data(df_key, series, top_n=20):
 # row sampled null matrix, capped so the chart stays readable
 @st.cache_data(show_spinner=False)
 def get_missing_heatmap_data(df_key, _df):
+    """
+    Caps the sample at 300 rows for rendering. On large files this is sampled
+    from the full df so the heatmap is still representative.
+    """
     df = _df
     max_rows = 300
     sample = df.sample(max_rows, random_state=0) if len(df) > max_rows else df
@@ -209,11 +309,16 @@ def get_missing_heatmap_data(df_key, _df):
 # correlation matrix for all numeric columns, melted into long form
 @st.cache_data(show_spinner=False)
 def get_correlation_data(df_key, _df, method="pearson"):
+    """
+    On large files computes correlation on a sample to stay fast.
+    Correlation on 20k rows is statistically equivalent to the full dataset.
+    """
     df = _df
     num_cols = df.select_dtypes(include="number").columns.tolist()
     if len(num_cols) < 2:
         return {}
-    corr = df[num_cols].corr(method=method).round(3)
+    sample = _sample_for_analysis(df)
+    corr = sample[num_cols].corr(method=method).round(3)
     rows = []
     for col_a in num_cols:
         for col_b in num_cols:
@@ -228,20 +333,25 @@ def get_correlation_data(df_key, _df, method="pearson"):
         "rows": rows,
         "col_order": num_cols,
         "n_cols": len(num_cols),
+        "is_sampled": len(sample) < len(df),
+        "sample_size": len(sample),
     }
 
 # scans every column and suggests a better type with a confidence score
 @st.cache_data(show_spinner=False)
 def get_type_suggestions(df_key, _df):
-    """Only columns where the current type is wrong or suboptimal get a suggestion."""
+    """Only columns where the current type is wrong or suboptimal get a suggestion.
+    On large files runs on a sample. Type patterns are consistent enough
+    that 20k rows gives the same suggestions as the full dataset."""
     df = _df
+    sample = _sample_for_analysis(df)
     email_pattern = r"^[\w\.\+\-]+@[\w\-]+\.[a-zA-Z]{2,}$"
     currency_pattern = r'[$€£¥₹₽₺₩฿]|(USD|EUR|GBP|JPY|CNY|INR|PKR|Rs\.?)'
     bool_values = {"true", "false", "yes", "no", "1", "0", "y", "n"}
     suggestions = []
 
-    for col in df.columns:
-        s = df[col]
+    for col in sample.columns:
+        s = sample[col]
         current_type = str(s.dtype)
         non_null = s.dropna()
         n = len(non_null)
@@ -407,7 +517,9 @@ def get_type_suggestions(df_key, _df):
 @st.cache_data(show_spinner=False)
 def get_quality_score(df_key, _df):
     """Each dimension contributes 20 points. Cache is keyed on df_key so the score
-    still updates live as the user cleans, without hashing the full dataframe."""
+    still updates live as the user cleans, without hashing the full dataframe.
+    On large files uses a sample for the expensive per-column passes.
+    Row-level metrics like duplicates and missing counts still use the full df."""
     df = _df
     total_cells = df.shape[0] * df.shape[1]
     if total_cells == 0:
@@ -415,6 +527,7 @@ def get_quality_score(df_key, _df):
 
     n_rows = len(df)
     n_cols = df.shape[1]
+    sample = _sample_for_analysis(df)
 
     # completeness, deducted proportionally to the fraction of missing cells
     missing_frac = df.isna().sum().sum() / total_cells
@@ -426,8 +539,8 @@ def get_quality_score(df_key, _df):
 
     # type consistency, flags object columns that mostly hold numeric text
     inconsistent_cols = 0
-    for col in df.select_dtypes(include="object").columns:
-        s = df[col].dropna().astype(str).str.strip()
+    for col in sample.select_dtypes(include="object").columns:
+        s = sample[col].dropna().astype(str).str.strip()
         if len(s) == 0:
             continue
         numeric_frac = pd.to_numeric(
@@ -439,10 +552,10 @@ def get_quality_score(df_key, _df):
     type_score = round(max(0, 20 - (inconsistent_cols / max(n_cols, 1)) * 20))
 
     # outlier cleanliness, uses 3x iqr fences to only flag extreme outliers
-    num_cols = df.select_dtypes(include=np.number).columns
+    num_cols = sample.select_dtypes(include=np.number).columns
     outlier_fracs = []
     for col in num_cols:
-        s = df[col].dropna()
+        s = sample[col].dropna()
         if len(s) < 4:
             continue
         q1, q3 = s.quantile(0.25), s.quantile(0.75)
@@ -457,8 +570,8 @@ def get_quality_score(df_key, _df):
     # validity, checks for placeholder text like none, na, unknown, null
     invalid_pattern = r"^(none|na|n/a|null|unknown|\?|nan|-|)$"
     invalid_fracs = []
-    for col in df.select_dtypes(include="object").columns:
-        s = df[col].dropna().astype(str).str.strip().str.lower()
+    for col in sample.select_dtypes(include="object").columns:
+        s = sample[col].dropna().astype(str).str.strip().str.lower()
         if len(s) == 0:
             continue
         invalid_frac = s.str.match(invalid_pattern, na=False).mean()

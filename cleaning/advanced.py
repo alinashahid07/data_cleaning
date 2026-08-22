@@ -4,6 +4,10 @@ import pandas as pd
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer, KNNImputer
 
+# knn and mice become too slow and memory hungry above this row count
+# above this threshold we fall back to fast mean or median imputation
+IMPUTER_ROW_LIMIT = 50_000
+
 # parse a duration string into seconds
 def _convert_duration_val(v):
     t = 0
@@ -73,14 +77,33 @@ def smart_column_cleaner(df, conversion_threshold=0.6, inplace=False):
     return None if inplace else df_clean
 
 # fill missing values
+def _fast_numeric_impute(df_clean, num_cols):
+    """
+    Mean imputation used when the file is too large for KNN or MICE.
+    Much faster and uses almost no extra memory. Less accurate than KNN
+    but the only practical option for 100k plus row files in a browser app.
+    """
+    for col in num_cols:
+        if df_clean[col].isna().any():
+            fill_val = df_clean[col].mean()
+            df_clean[col] = df_clean[col].fillna(fill_val)
+    return df_clean
+
 def missing_value_handler(df, threshold=0.3, inplace=False, numeric_strategy="auto"):
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a pandas DataFrame")
     if df.empty:
         return None if inplace else df.copy()
     df_clean = df.copy() if not inplace else df
-    if numeric_strategy == "auto" and (df_clean.shape[1] > 50 or len(df_clean) > 5000):
-        numeric_strategy = "mice"
+    n_rows = len(df_clean)
+    is_large = n_rows >= IMPUTER_ROW_LIMIT
+    if numeric_strategy == "auto":
+        if is_large:
+            numeric_strategy = "fast"
+        elif df_clean.shape[1] > 50 or n_rows > 5000:
+            numeric_strategy = "mice"
+        else:
+            numeric_strategy = "knn"
 
     # convert missing indicators
     df_clean = df_clean.replace(["?", "NA", "unknown", "n/a", "NaN", "null", -999, 999, 9999, ""], np.nan)
@@ -95,16 +118,20 @@ def missing_value_handler(df, threshold=0.3, inplace=False, numeric_strategy="au
 
     # numeric imputation
     if not num_cols.empty and df_clean[num_cols].isna().any().any():
-        if numeric_strategy == "knn" or (numeric_strategy == "auto" and len(df_clean) <= 5000):
-            n_neighbors = max(1, min(5, max(1, len(df_clean) // 1000), len(df_clean)))
+        if numeric_strategy == "fast":
+            # mean imputation, runs in linear time, safe for 500k rows
+            df_clean = _fast_numeric_impute(df_clean, num_cols)
+        elif numeric_strategy == "knn":
+            n_neighbors = max(1, min(5, max(1, n_rows // 1000), n_rows))
             imputer = KNNImputer(n_neighbors=n_neighbors)
+            df_clean[num_cols] = imputer.fit_transform(df_clean[num_cols])
         else:
             # mice needs at least 2 numeric columns to model relationships
             if len(num_cols) >= 2:
                 imputer = IterativeImputer(max_iter=10, random_state=42)
             else:
-                imputer = KNNImputer(n_neighbors=max(1, min(3, len(df_clean))))
-        df_clean[num_cols] = imputer.fit_transform(df_clean[num_cols])
+                imputer = KNNImputer(n_neighbors=max(1, min(3, n_rows)))
+            df_clean[num_cols] = imputer.fit_transform(df_clean[num_cols])
 
     # categorical imputation
     for col in cat_cols:
